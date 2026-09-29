@@ -2,6 +2,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { rm, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { createOwnedTempDir } from "../util/owned-temp.ts";
 import {
   CallToolRequestSchema,
@@ -192,6 +194,9 @@ export function createServer(deps: McpDeps): {
   const busySessions = new Map<string, number>();
   const sessionChains = new Map<string, Promise<unknown>>();
   const disconnectedSessions = new Set<string>();
+  // In-flight browser_run slot reservations: closes the check-then-create race where
+  // concurrent calls all pass the session capacity check before any of them registers.
+  const reservedSlots = new Set<Set<string>>();
   // Closing aborts in-flight work (the session reports session_closed); screenshot writers re-check
   // this set after every await so nothing is created for a session once its close has started.
   const closingSessions = new Set<string>();
@@ -292,8 +297,8 @@ export function createServer(deps: McpDeps): {
       .replace(/\b(?:env|file):[^\s,;]+/giu, "[REDACTED]")
       .replace(/\bsecret_ref\s*[:=]\s*[^\s,;]+/giu, "secret_ref=[REDACTED]")
       .replace(
-        /\b(?:api[_-]?key|secret|password|token|value|values)(?:\s*[:=]\s*)[^\s,;]+/giu,
-        "$1=[REDACTED]",
+        /\b(api[_-]?key|secret|password|token|value|values)(\s*[:=]\s*)[^\s,;]+/giu,
+        "$1$2[REDACTED]",
       )
       .replace(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/gu, "[REDACTED]")
       .slice(0, 300);
@@ -402,14 +407,15 @@ export function createServer(deps: McpDeps): {
           if (busySessions.has(id)) return;
           if ((deps.clock ?? Date.now)() - instance.updatedAt < instance.idleTimeoutMs) return;
           closingSessions.add(id);
-          if (!(await instance.reclaimIdle()) || sessions.get(id) !== instance) {
+          try {
+            if (!(await instance.reclaimIdle()) || sessions.get(id) !== instance) return;
+            sessions.delete(id);
+            const directory = screenshotDirs.get(id);
+            screenshotDirs.delete(id);
+            if (directory) await rm(directory, { recursive: true, force: true });
+          } finally {
             closingSessions.delete(id);
-            return;
           }
-          sessions.delete(id);
-          const directory = screenshotDirs.get(id);
-          screenshotDirs.delete(id);
-          if (directory) await rm(directory, { recursive: true, force: true });
         }),
       );
     })().finally(() => {
@@ -435,8 +441,8 @@ export function createServer(deps: McpDeps): {
         ? Promise.resolve(result(noDecisionPort()))
         : handle("browser_run", async () => {
             if (input.url) requireHttpUrl(input.url);
-            if (sessions.size >= (deps.maxSessions ?? 8)) await sweepIdle();
-            if (sessions.size >= (deps.maxSessions ?? 8))
+            if (sessions.size + reservedSlots.size >= (deps.maxSessions ?? 8)) await sweepIdle();
+            if (sessions.size + reservedSlots.size >= (deps.maxSessions ?? 8))
               return {
                 status: "FAILED" as const,
                 reason: "too_many_sessions",
@@ -449,159 +455,173 @@ export function createServer(deps: McpDeps): {
                 timing: { total: 0, decide: 0, browser: 0, harness: 0 },
                 usage: { decision_tokens: 0 },
               };
-            const active = await getBrowser(input.profile);
-            if (deps.isolatedSessions && !active.capabilities.isolatedContexts)
-              throw new McpUserError("Selected engine does not support isolated sessions.");
-            const page = await active.newPage(
-              deps.isolatedSessions ? { isolated: { copyCookies: false } } : undefined,
-            );
+            const reserved = new Set<string>();
+            reservedSlots.add(reserved);
             try {
-              let initialBlockedRequest: PageEvents["requestBlocked"] | undefined;
-              page.on("requestBlocked", (event) => {
-                if (event.frame === "main") initialBlockedRequest = event;
-              });
-              const configuredDomains = deps.allowedDomains;
-              const requestedDomains = input.constraints?.allowed_domains;
-              if (
-                configuredDomains?.length &&
-                requestedDomains?.some(
-                  (domain) =>
-                    !configuredDomains.some(
-                      (allowed) =>
-                        domain.toLowerCase() === allowed.toLowerCase() ||
-                        domain.toLowerCase().endsWith(`.${allowed.toLowerCase()}`),
-                    ),
-                )
-              )
-                throw new McpUserError("Requested domain is outside the server allowlist.");
-              const allowedDomains = configuredDomains?.length
-                ? requestedDomains?.length
-                  ? requestedDomains.filter((domain) =>
-                      configuredDomains.some(
+              const active = await getBrowser(input.profile);
+              if (deps.isolatedSessions && !active.capabilities.isolatedContexts)
+                throw new McpUserError("Selected engine does not support isolated sessions.");
+              const page = await active.newPage(
+                deps.isolatedSessions ? { isolated: { copyCookies: false } } : undefined,
+              );
+              try {
+                let initialBlockedRequest: PageEvents["requestBlocked"] | undefined;
+                page.on("requestBlocked", (event) => {
+                  if (event.frame === "main") initialBlockedRequest = event;
+                });
+                const configuredDomains = deps.allowedDomains;
+                const requestedDomains = input.constraints?.allowed_domains;
+                if (
+                  configuredDomains?.length &&
+                  requestedDomains?.some(
+                    (domain) =>
+                      !configuredDomains.some(
                         (allowed) =>
                           domain.toLowerCase() === allowed.toLowerCase() ||
                           domain.toLowerCase().endsWith(`.${allowed.toLowerCase()}`),
                       ),
-                    )
-                  : configuredDomains
-                : requestedDomains;
-              if (configuredDomains?.length && requestedDomains?.length && !allowedDomains?.length)
-                throw new McpUserError("Requested domains are outside the server allowlist.");
-              if (input.url && allowedDomains?.length) {
-                const hostname = new URL(input.url).hostname.toLowerCase();
-                if (
-                  !allowedDomains.some(
-                    (domain) =>
-                      hostname === domain.toLowerCase() ||
-                      hostname.endsWith(`.${domain.toLowerCase()}`),
                   )
                 )
-                  throw new McpUserError("Initial URL is outside allowed domains.");
-              }
-              const navigationTimeoutMs =
-                input.navigation_timeout_ms ?? deps.navigationTimeoutMs ?? 30_000;
-              const navigationStarted = performance.now();
-              const navigation = input.url
-                ? await page
-                    .navigate(input.url, { timeoutMs: navigationTimeoutMs })
-                    .catch((error: unknown) => ({
-                      url: input.url!,
-                      headers: {},
-                      failure:
-                        error instanceof Error && error.name === "CdpTimeoutError"
-                          ? "timeout"
-                          : error instanceof Error && error.name === "CdpDisconnectedError"
-                            ? "disconnected"
-                            : error instanceof Error && error.name === "CdpProtocolError"
-                              ? "protocol"
-                              : "navigation_error",
-                    }))
-                : undefined;
-              const navigationMs = navigation ? performance.now() - navigationStarted : undefined;
-              const instance = new OrchestratorSession(
-                {
-                  page,
-                  automaticIsolatedFallback: !deps.isolatedSessions,
-                  ...(active.capabilities.isolatedContexts
-                    ? {
-                        openIsolatedPage: (copyCookies: boolean) =>
-                          active.newPage({
-                            isolated: { copyCookies: deps.isolatedSessions ? false : copyCookies },
-                          }),
-                      }
-                    : {}),
-                  goal: input.goal,
-                  ...(deps.decisionProvider ? { decisionProvider: deps.decisionProvider } : {}),
-                  ...(deps.decisionContextLimit !== undefined
-                    ? { decisionContextLimit: deps.decisionContextLimit }
-                    : {}),
-                  ...(deps.usageDetail ? { usageDetail: true } : {}),
-                  ...deps.sessionOptions,
-                  navigationTimeoutMs,
-                  ...(navigationMs !== undefined ? { navigationMs } : {}),
-                  ...(deps.actionabilityTimeoutMs
-                    ? { actionabilityTimeoutMs: deps.actionabilityTimeoutMs }
-                    : {}),
-                  ...(deps.decisionLogPath ? { decisionLogPath: deps.decisionLogPath } : {}),
-                  thresholds: Object.fromEntries(
-                    Object.entries({ ...deps.thresholds, ...input.thresholds }).filter(
-                      ([, value]) => value !== undefined,
-                    ),
-                  ),
-                  ...(navigation ? { navigation } : {}),
-                  ...(initialBlockedRequest ? { initialBlockedRequest } : {}),
-                  ...(input.values ? { values: input.values } : {}),
-                  ...(input.success
-                    ? {
-                        success: {
-                          ...(input.success.url_matches !== undefined
-                            ? { url_matches: input.success.url_matches }
-                            : {}),
-                          ...(input.success.text_present !== undefined
-                            ? { text_present: input.success.text_present }
-                            : {}),
-                          ...(input.success.element_present
-                            ? { element_present: input.success.element_present }
-                            : {}),
-                        },
-                      }
-                    : {}),
-                  ...(input.budget
-                    ? {
-                        budget: {
-                          ...(input.budget.steps !== undefined
-                            ? { steps: input.budget.steps }
-                            : {}),
-                          ...(input.budget.seconds !== undefined
-                            ? { seconds: input.budget.seconds }
-                            : {}),
-                          ...(input.budget.decision_tokens !== undefined
-                            ? { decision_tokens: input.budget.decision_tokens }
-                            : {}),
-                        },
-                      }
-                    : {}),
-                  constraints: {
-                    ...(input.constraints?.allow_irreversible !== undefined
-                      ? { allow_irreversible: input.constraints.allow_irreversible }
+                  throw new McpUserError("Requested domain is outside the server allowlist.");
+                const allowedDomains = configuredDomains?.length
+                  ? requestedDomains?.length
+                    ? requestedDomains.filter((domain) =>
+                        configuredDomains.some(
+                          (allowed) =>
+                            domain.toLowerCase() === allowed.toLowerCase() ||
+                            domain.toLowerCase().endsWith(`.${allowed.toLowerCase()}`),
+                        ),
+                      )
+                    : configuredDomains
+                  : requestedDomains;
+                if (
+                  configuredDomains?.length &&
+                  requestedDomains?.length &&
+                  !allowedDomains?.length
+                )
+                  throw new McpUserError("Requested domains are outside the server allowlist.");
+                if (input.url && allowedDomains?.length) {
+                  const hostname = new URL(input.url).hostname.toLowerCase();
+                  if (
+                    !allowedDomains.some(
+                      (domain) =>
+                        hostname === domain.toLowerCase() ||
+                        hostname.endsWith(`.${domain.toLowerCase()}`),
+                    )
+                  )
+                    throw new McpUserError("Initial URL is outside allowed domains.");
+                }
+                const navigationTimeoutMs =
+                  input.navigation_timeout_ms ?? deps.navigationTimeoutMs ?? 30_000;
+                const navigationStarted = performance.now();
+                const navigation = input.url
+                  ? await page
+                      .navigate(input.url, { timeoutMs: navigationTimeoutMs })
+                      .catch((error: unknown) => ({
+                        url: input.url!,
+                        headers: {},
+                        failure:
+                          error instanceof Error && error.name === "CdpTimeoutError"
+                            ? "timeout"
+                            : error instanceof Error && error.name === "CdpDisconnectedError"
+                              ? "disconnected"
+                              : error instanceof Error && error.name === "CdpProtocolError"
+                                ? "protocol"
+                                : "navigation_error",
+                      }))
+                  : undefined;
+                const navigationMs = navigation ? performance.now() - navigationStarted : undefined;
+                const instance = new OrchestratorSession(
+                  {
+                    page,
+                    automaticIsolatedFallback: !deps.isolatedSessions,
+                    ...(active.capabilities.isolatedContexts
+                      ? {
+                          openIsolatedPage: (copyCookies: boolean) =>
+                            active.newPage({
+                              isolated: {
+                                copyCookies: deps.isolatedSessions ? false : copyCookies,
+                              },
+                            }),
+                        }
                       : {}),
-                    ...(allowedDomains ? { allowed_domains: allowedDomains } : {}),
+                    goal: input.goal,
+                    ...(deps.decisionProvider ? { decisionProvider: deps.decisionProvider } : {}),
+                    ...(deps.decisionContextLimit !== undefined
+                      ? { decisionContextLimit: deps.decisionContextLimit }
+                      : {}),
+                    ...(deps.usageDetail ? { usageDetail: true } : {}),
+                    ...deps.sessionOptions,
+                    navigationTimeoutMs,
+                    ...(navigationMs !== undefined ? { navigationMs } : {}),
+                    ...(deps.actionabilityTimeoutMs
+                      ? { actionabilityTimeoutMs: deps.actionabilityTimeoutMs }
+                      : {}),
+                    ...(deps.decisionLogPath ? { decisionLogPath: deps.decisionLogPath } : {}),
+                    thresholds: Object.fromEntries(
+                      Object.entries({ ...deps.thresholds, ...input.thresholds }).filter(
+                        ([, value]) => value !== undefined,
+                      ),
+                    ),
+                    ...(navigation ? { navigation } : {}),
+                    ...(initialBlockedRequest ? { initialBlockedRequest } : {}),
+                    ...(input.values ? { values: input.values } : {}),
+                    ...(input.success
+                      ? {
+                          success: {
+                            ...(input.success.url_matches !== undefined
+                              ? { url_matches: input.success.url_matches }
+                              : {}),
+                            ...(input.success.text_present !== undefined
+                              ? { text_present: input.success.text_present }
+                              : {}),
+                            ...(input.success.element_present
+                              ? { element_present: input.success.element_present }
+                              : {}),
+                          },
+                        }
+                      : {}),
+                    ...(input.budget
+                      ? {
+                          budget: {
+                            ...(input.budget.steps !== undefined
+                              ? { steps: input.budget.steps }
+                              : {}),
+                            ...(input.budget.seconds !== undefined
+                              ? { seconds: input.budget.seconds }
+                              : {}),
+                            ...(input.budget.decision_tokens !== undefined
+                              ? { decision_tokens: input.budget.decision_tokens }
+                              : {}),
+                          },
+                        }
+                      : {}),
+                    constraints: {
+                      ...(input.constraints?.allow_irreversible !== undefined
+                        ? { allow_irreversible: input.constraints.allow_irreversible }
+                        : {}),
+                      ...(allowedDomains ? { allowed_domains: allowedDomains } : {}),
+                    },
                   },
-                },
-                {
-                  ...deps.orchestrator,
-                  ...(deps.clock ? { now: deps.clock } : {}),
-                  ...(deps.decisionPort
-                    ? { decide: (request, options) => deps.decisionPort!.decide(request, options) }
-                    : {}),
-                },
-              );
-              sessions.set(instance.id, instance);
-              return await inSession(instance, () => instance.run());
-            } catch (error) {
-              if (![...sessions.values()].some((item) => item.page === page))
-                await page.close().catch(() => {});
-              throw error;
+                  {
+                    ...deps.orchestrator,
+                    ...(deps.clock ? { now: deps.clock } : {}),
+                    ...(deps.decisionPort
+                      ? {
+                          decide: (request, options) => deps.decisionPort!.decide(request, options),
+                        }
+                      : {}),
+                  },
+                );
+                sessions.set(instance.id, instance);
+                return await inSession(instance, () => instance.run());
+              } catch (error) {
+                if (![...sessions.values()].some((item) => item.page === page))
+                  await page.close().catch(() => {});
+                throw error;
+              }
+            } finally {
+              reservedSlots.delete(reserved);
             }
           }),
   );
@@ -689,6 +709,7 @@ export function createServer(deps: McpDeps): {
                 }
                 directory = await creating;
                 if (closing || closingSessions.has(input.session) || !sessions.has(input.session)) {
+                  creatingScreenshotDirs.delete(input.session);
                   await rm(directory, { recursive: true, force: true });
                   return observed;
                 }
@@ -856,7 +877,23 @@ export function createServer(deps: McpDeps): {
     );
 
   const createMcpServer = (): McpServer => {
-    const server = new McpServer({ name: "jevpilot", version: "0.1.0" });
+    // The reported version must track package.json (the audit found "0.1.0" hardcoded here
+    // while the package was already 0.1.1); the try keeps standalone runs working.
+    let version = "0.0.0";
+    try {
+      version =
+        (
+          JSON.parse(
+            readFileSync(
+              join(fileURLToPath(new URL(".", import.meta.url)), "../../package.json"),
+              "utf8",
+            ),
+          ) as { version?: string }
+        ).version ?? version;
+    } catch {
+      // Keep the fallback version when package.json is not shipped (it always is for npm packs).
+    }
+    const server = new McpServer({ name: "jevpilot", version });
     for (const register of registrations) register(server);
     server.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const tool = dispatch.get(request.params.name);
@@ -901,7 +938,9 @@ export function createServer(deps: McpDeps): {
         try {
           await browser?.close();
         } catch (error) {
-          process.stderr.write(`jevpilot-mcp browser close failed: ${String(error)}\n`);
+          process.stderr.write(
+            `jevpilot-mcp browser close failed: ${sanitizedErrorMessage(error)}\n`,
+          );
         }
         await server.close();
       })();

@@ -91,22 +91,29 @@ export async function loadMcpProfile(
       if (check.kind !== "attach") buildLaunchArgs(check);
     } catch (error) {
       if (!(error instanceof BrowserConfigError)) throw error;
+      const rejected = error.problems.filter((problem) => problem !== error.message);
       throw new McpUserError(
-        "JEVPILOT_EXTRA_ARGS contains a flag jevpilot does not allow (--headless, --disable-gpu, --enable-automation).",
+        `JEVPILOT_EXTRA_ARGS contains a flag jevpilot does not allow (--headless, --disable-gpu, --enable-automation)${rejected.length ? `: ${rejected.join("; ")}` : "."}`,
       );
     }
   }
   const ownedDirectory = env.JEVPILOT_USER_DATA_DIR
     ? undefined
     : await createOwnedTempDir("jevpilot-mcp-browser-");
-  const profile = parseCdpProfile({
-    ...settings,
-    userDataDir: env.JEVPILOT_USER_DATA_DIR ?? ownedDirectory,
-  });
-  return {
-    profile,
-    cleanup: async () => {
-      if (ownedDirectory) await removeTempDir(ownedDirectory);
-    },
-  };
+  try {
+    const profile = parseCdpProfile({
+      ...settings,
+      userDataDir: env.JEVPILOT_USER_DATA_DIR ?? ownedDirectory,
+    });
+    return {
+      profile,
+      cleanup: async () => {
+        if (ownedDirectory) await removeTempDir(ownedDirectory);
+      },
+    };
+  } catch (error) {
+    // Do not leak the just-created profile directory when the profile is invalid.
+    if (ownedDirectory) await removeTempDir(ownedDirectory).catch(() => {});
+    throw error;
+  }
 }

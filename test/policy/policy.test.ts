@@ -501,38 +501,39 @@ test("stable request shape and page field isolation", () => {
     'url: https://example.test/form\ntitle: Example\ne1  button  "Continue"\ne2  textbox  "Name"  required  =""\ne3  textbox  "Password"\ne4  select  "Country"  =  {Taiwan|Japan}\ne5  checkbox  "Agree"\npage: Please complete the form',
   );
 
-  test("calibrated policy threshold defaults use exact inclusive boundaries", async () => {
-    assert.deepEqual(POLICY_DEFAULT_THRESHOLDS, {
-      op: 0.6,
-      target: 0.6,
-      value_for: 0.6,
-      option_for: 0.7,
-      situation: 0.6,
-      goal_met: 0.6,
-      goal_met_unchanged: 0.8,
-      check: 0.7,
-      check_margin: 0.15,
-    });
-    const source = input();
-    const request = buildDecisionState(source);
-    assert.deepEqual(
-      interpret(request.questions, await decide(request, { op: "DONE" }, 0.6), source),
-      { type: "done_candidate", goalMet: 0.6 },
-    );
-    const boundarySource = input();
-    boundarySource.observation.elements = [
-      element("e2", "textbox", "Name", { inputType: "text", required: true, value: "" }),
-    ];
-    const boundaryRequest = buildDecisionState(boundarySource);
-    const mapping = await decide(boundaryRequest, { op: "TYPE", value_for_e2: "person_name" });
-    if (mapping.value_for_e2?.type !== "choice") throw new Error("missing field mapping");
-    mapping.value_for_e2.confidence = 0.6;
-    assert.equal(interpret(boundaryRequest.questions, mapping, boundarySource).type, "batch");
-  });
   assert.deepEqual(result.reductions, []);
   assert.deepEqual(result.state.recent_trace, [
     { op: "CLICK", page_target_name: "Previous button", outcome: "changed" },
   ]);
+});
+
+test("calibrated policy threshold defaults use exact inclusive boundaries", async () => {
+  assert.deepEqual(POLICY_DEFAULT_THRESHOLDS, {
+    op: 0.6,
+    target: 0.6,
+    value_for: 0.6,
+    option_for: 0.7,
+    situation: 0.6,
+    goal_met: 0.6,
+    goal_met_unchanged: 0.8,
+    check: 0.7,
+    check_margin: 0.15,
+  });
+  const source = input();
+  const request = buildDecisionState(source);
+  assert.deepEqual(
+    interpret(request.questions, await decide(request, { op: "DONE" }, 0.6), source),
+    { type: "done_candidate", goalMet: 0.6 },
+  );
+  const boundarySource = input();
+  boundarySource.observation.elements = [
+    element("e2", "textbox", "Name", { inputType: "text", required: true, value: "" }),
+  ];
+  const boundaryRequest = buildDecisionState(boundarySource);
+  const mapping = await decide(boundaryRequest, { op: "TYPE", value_for_e2: "person_name" });
+  if (mapping.value_for_e2?.type !== "choice") throw new Error("missing field mapping");
+  mapping.value_for_e2.confidence = 0.6;
+  assert.equal(interpret(boundaryRequest.questions, mapping, boundarySource).type, "batch");
 });
 
 test("eligibility, viewport, bounds and question identifiers", () => {
@@ -550,7 +551,6 @@ test("eligibility, viewport, bounds and question identifiers", () => {
   if (click?.type !== "choice") return;
   assert.ok("e1" in click.criteria && "e5" in click.criteria && "e9" in click.criteria);
   assert.ok(!("e6" in click.criteria));
-  assert.equal(questions.type_target, undefined);
   assert.ok(!questions.value_for_e7 && !questions.value_for_e8);
   assert.ok(!("value_for_e9" in questions));
   assert.ok(Object.keys(questions).every((id) => /^[a-z0-9_]+$/u.test(id)));
@@ -939,7 +939,6 @@ test("required missing values hand off and invalid target/value combinations sta
   const request = buildDecisionState(source);
   const missing = await decide(request, {
     op: "TYPE",
-    type_target: "e2",
     value_for_e2: "not_provided",
   });
   const result = interpret(request.questions, missing, source);
@@ -1114,7 +1113,6 @@ test("only chosen-path confidence gates a scroll or target action", async () => 
   assert.equal(interpret(request.questions, click, source).type, "check");
   const type = await decide(request, {
     op: "TYPE",
-    type_target: "e2",
     value_for_e2: "person_name",
   });
   if (type.value_for_e2?.type === "choice") type.value_for_e2.confidence = 0.2;
@@ -1229,7 +1227,6 @@ test("TYPE uses required-field evidence without an active form; SCROLL ignores t
   );
   const type = await decide(request, {
     op: "TYPE",
-    type_target: "e2",
     value_for_e2: "not_provided",
   });
   assert.equal(
@@ -1361,7 +1358,6 @@ test("needs_user_values requires a field with missing value evidence", async () 
     assert.match(String(situation.criteria.needs_user_values), /"person_name"/u);
   const supplied = await decide(request, {
     op: "TYPE",
-    type_target: "e2",
     value_for_e2: "person_name",
     situation: "needs_user_values",
   });
@@ -1373,7 +1369,6 @@ test("needs_user_values requires a field with missing value evidence", async () 
     assert.match(String(emptySituation.criteria.needs_user_values), /none supplied/u);
   const missing = await decide(noKeys, {
     op: "WAIT",
-    type_target: "e2",
     value_for_e2: "not_provided",
     situation: "needs_user_values",
   });
@@ -1391,7 +1386,6 @@ test("model not_provided on a required field hands off", async () => {
   const request = buildDecisionState(source);
   const answers = await decide(request, {
     op: "TYPE",
-    type_target: "e2",
     value_for_e2: "not_provided",
     situation: "needs_user_values",
   });
@@ -1409,7 +1403,6 @@ test("TYPE uses a supplied key for only the first equally confident field", asyn
   ];
   source.valueKeys = [{ name: "entry", secret: false }];
   const request = buildDecisionState(source);
-  assert.equal(request.questions.type_target, undefined);
   const answers = await decide(request, {
     op: "TYPE",
     value_for_e1: "entry",
@@ -1940,7 +1933,6 @@ test("select targets expose options; optionless comboboxes use click or type", (
   const click = questions.click_target;
   assert.equal(select?.type, "choice");
   assert.equal(click?.type, "choice");
-  assert.equal(questions.type_target, undefined);
   if (select?.type === "choice" && click?.type === "choice") {
     assert.ok(!("e6" in select.criteria));
     assert.ok("e6" in click.criteria);
@@ -2047,7 +2039,16 @@ test("large OpenRouter request fits and low-priority offscreen target options sh
   const rankedLimit =
     estimateTokens({ state: rankedFull.state, questions: rankedFull.questions }) - 1;
   const rankedReduced = buildDecisionState({ ...rankedInput, contextLimit: rankedLimit });
-  assert.equal(rankedReduced.questions.type_target, undefined);
+  assert.ok(rankedReduced.reductions.includes("target_options"));
+  const fullTarget = rankedFull.questions.click_target;
+  const reducedTarget = rankedReduced.questions.click_target;
+  if (fullTarget?.type !== "choice" || reducedTarget?.type !== "choice")
+    throw new Error("missing click target question");
+  const trimmedRefs = Object.keys(fullTarget.criteria).filter(
+    (ref) => !(ref in reducedTarget.criteria),
+  );
+  assert.deepEqual(trimmedRefs, ["e2"]);
+  assert.ok("e1" in reducedTarget.criteria);
 });
 
 test("capped and trimmed value questions do not claim a provided value is missing", async () => {
@@ -2117,7 +2118,7 @@ test("capped and trimmed value questions do not claim a provided value is missin
   );
   const trimmedType = interpret(
     trimmed.questions,
-    await decide(trimmed, { op: "TYPE", type_target: "e2" }),
+    await decide(trimmed, { op: "TYPE" }),
     trimmedSource,
   );
   assert.equal(trimmedType.type, "handoff");
@@ -2205,7 +2206,6 @@ test("interpreter rejects secret-to-text and plain-to-password even with hand-bu
     };
     const answers = await decide(request, {
       op: "TYPE",
-      type_target: ref,
       [`value_for_${ref}`]: key,
     });
     const outcome = interpret(request.questions, answers, source);

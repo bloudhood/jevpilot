@@ -20,6 +20,9 @@ export class CircuitBreaker {
     countFailure: (error: unknown) => boolean = () => true,
   ): Promise<T> {
     if (this.openedAt !== undefined) {
+      // Single-probe half-open: while a probe is in flight, all other callers fail fast
+      // even after the cooldown elapses. A probe that hangs keeps this window open until
+      // the operation's own timeout resolves it (sendWithRetry enforces one).
       if (this.clock.now() - this.openedAt < this.cooldownMs || this.probing) {
         throw new CircuitOpenError("decision circuit open");
       }

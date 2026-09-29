@@ -18,6 +18,12 @@ const privateRanges = [
   "198.18.0.0/15",
   "::/128",
   "::1/128",
+  // IPv4-compatible残留 (::a.b.c.d, excluding :: and ::1 via the /96 range below).
+  "::/96",
+  // IPv4-VPN translation (RFC 8215) alongside the well-known NAT64 prefix.
+  "64:ff9b:1::/48",
+  // 6to4 with an embedded IPv4 host part.
+  "2002::/16",
   "fc00::/7",
   "fe80::/10",
 ];
@@ -67,7 +73,15 @@ export function validCidr(value: string): boolean {
   const parts = value.split("/");
   if (parts.length !== 2 || !parts[0] || !parts[1] || !/^\d+$/u.test(parts[1])) return false;
   const address = bytes(parts[0]);
-  return !!address && Number(parts[1]) <= address.length * 8;
+  if (!address) return false;
+  const bits = Number(parts[1]);
+  if (bits > address.length * 8) return false;
+  // Host bits outside the prefix must be zero: "10.0.0.1/8" is rejected, use "10.0.0.0/8".
+  return address.every((byte, index) => {
+    const remaining = bits - index * 8;
+    const mask = remaining >= 8 ? 255 : remaining <= 0 ? 0 : (255 << (8 - remaining)) & 255;
+    return (byte & ~mask & 255) === 0;
+  });
 }
 
 export function blockedAddress(address: string, guard: NetworkGuard): boolean {
@@ -118,7 +132,8 @@ export async function blockedUrl(
     ]);
     return addresses.find((item) => blockedAddress(item.address, guard))?.address;
   } catch {
-    return undefined;
+    // A lookup we cannot complete must not silently pass the guard (SSRF fail-open).
+    return host;
   } finally {
     if (timer) clearTimeout(timer);
   }

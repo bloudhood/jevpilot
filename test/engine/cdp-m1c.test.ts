@@ -188,7 +188,16 @@ async function fixture(
   });
   const driver = createCdpDriver({
     cdpOptions: { websocketFactory: () => new WebSocket(fake.url) },
-    ...(options.lookup ? { lookup: options.lookup } : {}),
+    ...(options.lookup
+      ? { lookup: options.lookup }
+      : {
+          // Tests without an explicit lookup must not depend on real DNS (CI sandboxes
+          // often have none, and the guard now fails closed on lookup errors).
+          lookup: async (host: string) =>
+            host === "metadata.test"
+              ? [{ address: "169.254.1.1", family: 4 }]
+              : [{ address: "127.0.0.1", family: 4 }],
+        }),
   });
   const browser = await driver.launch(
     { kind: "attach", cdpUrl: fake.url },
@@ -231,10 +240,12 @@ test("O3: a paused document request is failed when its host resolves to a blocke
   };
   assert.equal(await blockedUrl("http://metadata.test/", guard, lookup), "169.254.1.1");
   assert.equal(await blockedUrl("http://safe.test/", guard, lookup), undefined);
-  assert.equal(await blockedUrl("http://error.test/", guard, lookup), undefined);
+  // A lookup that fails cannot verify the destination: the guard fails closed (audit fix),
+  // so the host itself is reported as the blocked address.
+  assert.equal(await blockedUrl("http://error.test/", guard, lookup), "error.test");
   const slowStarted = Date.now();
-  assert.equal(await blockedUrl("http://slow.test/", guard, lookup), undefined);
-  assert.ok(Date.now() - slowStarted < 3000, "a hanging lookup continues after its bound");
+  assert.equal(await blockedUrl("http://slow.test/", guard, lookup), "slow.test");
+  assert.ok(Date.now() - slowStarted < 3000, "a hanging lookup resolves to its 2s bound");
 
   const host = await fixture({ networkGuard: guard, lookup });
   try {
@@ -277,7 +288,11 @@ test("O3: a paused document request is failed when its host resolves to a blocke
       errorReason: "BlockedByClient",
     });
     assert.equal(byRequest.get("r2")?.method, "Fetch.continueRequest");
-    assert.equal(byRequest.get("r3")?.method, "Fetch.continueRequest");
+    // r3 fails closed: the lookup throws, so the request is blocked (audit fix).
+    assert.deepEqual(byRequest.get("r3")?.params, {
+      requestId: "r3",
+      errorReason: "BlockedByClient",
+    });
     assert.equal(byRequest.get("r4")?.method, "Fetch.failRequest");
     // After the main document commits, an iframe request paused on the page's session is a child block.
     host.event(
@@ -295,11 +310,12 @@ test("O3: a paused document request is failed when its host resolves to a blocke
       },
       "s1",
     );
-    await waitUntil(() => blocks.length === 3);
+    await waitUntil(() => blocks.length === 4);
     assert.deepEqual(blocks.map((block) => `${block.frame} ${block.address} ${block.url}`).sort(), [
       "child 169.254.169.254 http://169.254.169.254/frame",
       "main 169.254.1.1 http://metadata.test/",
       "main 169.254.169.254 http://169.254.169.254/latest/",
+      "main error.test http://error.test/",
     ]);
   } finally {
     await host.close();

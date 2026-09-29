@@ -120,7 +120,9 @@ async function main(): Promise<void> {
   });
   try {
     if (transportConfig.transport === "http" && transportConfig.http) {
-      const running = await startHttpServer(transportConfig.http, app.createMcpServer);
+      const running = await startHttpServer(transportConfig.http, app.createMcpServer, {
+        maxSessions,
+      });
       httpClose = running.close;
       if (
         !/^127\./u.test(transportConfig.http.host) &&

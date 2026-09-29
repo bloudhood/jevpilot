@@ -136,8 +136,11 @@ function checkConfidence(id: string, value: number, problems: string[]): void {
 
 function normalized(probabilities: Record<string, number>): Record<string, number> {
   const sum = Object.values(probabilities).reduce((total, value) => total + value, 0);
+  // Guard against an all-zero table producing NaN (validateAnswers rejects it first,
+  // but tagAnswers is exported and must stay total).
+  const divisor = Number.isFinite(sum) && sum > 0 ? sum : 1;
   return Object.fromEntries(
-    Object.entries(probabilities).map(([key, value]) => [key, value / sum]),
+    Object.entries(probabilities).map(([key, value]) => [key, value / divisor]),
   );
 }
 

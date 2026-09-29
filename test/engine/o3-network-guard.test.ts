@@ -37,8 +37,38 @@ test("O3: private mode also blocks loopback, private, link-local and shared rang
     "::1",
     "fc00::1",
     "fe80::1",
+    // IPv4-compatible remnants, RFC 8215 translation, and 6to4 carrying an IPv4 host part.
+    "::127.0.0.1",
+    "64:ff9b:1::7f00:1",
+    "2002:7f00:1::",
   ])
     assert.equal(blockedAddress(value, guard), true, value);
+  // Ordinary global addresses stay reachable.
+  for (const value of ["8.8.8.8", "2600::", "2001:db8::1"])
+    assert.equal(blockedAddress(value, guard), false, value);
+});
+
+test("O3: a failing or slow DNS lookup blocks the request instead of passing the guard", async () => {
+  const guard = parseNetworkGuard();
+  const failing = async () => {
+    throw new Error("SERVFAIL");
+  };
+  assert.equal(await blockedUrl("http://rebind.example/", guard, failing), "rebind.example");
+  const slow = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    return [];
+  };
+  const started = Date.now();
+  assert.equal(await blockedUrl("http://slow.example/", guard, slow), "slow.example");
+  assert.ok(Date.now() - started < 2900, "the 2s DNS timeout still applies");
+});
+
+test("O3: JEVPILOT_BLOCKED_ADDRESSES rejects CIDRs with host bits set", () => {
+  assert.throws(() => parseNetworkGuard("private", "10.0.0.1/8"), /JEVPILOT_BLOCKED_ADDRESSES/);
+  assert.throws(() => parseNetworkGuard("private", "fe80::1/10"), /JEVPILOT_BLOCKED_ADDRESSES/);
+  const guard = parseNetworkGuard("private", "203.0.113.0/24");
+  assert.deepEqual(guard.extraBlocked, ["203.0.113.0/24"]);
+  assert.equal(blockedAddress("203.0.113.7", guard), true);
 });
 
 test("O3: JEVPILOT_NETWORK_GUARD, JEVPILOT_BLOCKED_ADDRESSES and JEVPILOT_MAX_SESSIONS are validated at startup", () => {
