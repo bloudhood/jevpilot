@@ -410,7 +410,8 @@ describe("M1c real Chrome", { skip: skipped }, () => {
           created.some((name) => after.has(name)),
           false,
         );
-        assert.equal(sent.filter((method) => method === "Browser.setDownloadBehavior").length, 1);
+        // Set on launch, reset to default on close (user decision 2026-09-29).
+        assert.equal(sent.filter((method) => method === "Browser.setDownloadBehavior").length, 2);
       } finally {
         await attached?.close();
         await stopBrowser(child);

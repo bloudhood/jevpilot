@@ -14,6 +14,7 @@ import {
   InvalidAnswerError,
 } from "../decision/errors.ts";
 import { loadDecisionConfig } from "../decision/config.ts";
+import type { Provider } from "../decision/config.ts";
 import { validateAnswers } from "../decision/validate.ts";
 import type { DecisionRequest, DecisionResult } from "../decision/types.ts";
 import {
@@ -103,6 +104,8 @@ export type SessionOptions = {
   success?: SuccessAssertions;
   constraints?: { allowed_domains?: string[]; allow_irreversible?: boolean };
   budget?: { steps?: number; seconds?: number; decision_tokens?: number };
+  decisionProvider?: Provider;
+  decisionContextLimit?: number;
   thresholds?: PolicyContext["thresholds"];
   navigation?: NavigationResult;
   initialBlockedRequest?: PageEvents["requestBlocked"];
@@ -140,7 +143,7 @@ export type SessionDeps = {
   interpret: typeof interpret;
   checkQuestions: typeof checkQuestions;
   resolveCheck: typeof resolveCheck;
-  decide: (request: DecisionRequest) => Promise<DecisionResult>;
+  decide: (request: DecisionRequest, options?: { signal?: AbortSignal }) => Promise<DecisionResult>;
   executeAction: typeof executeAction;
   pageMatches: typeof pageMatches;
   now: () => number;
@@ -156,9 +159,9 @@ const defaults: SessionDeps = {
   interpret,
   checkQuestions,
   resolveCheck,
-  decide: (request) => {
+  decide: (request, options) => {
     defaultPort ??= createDecisionPort(loadDecisionConfig(process.env));
-    return defaultPort.decide(request);
+    return defaultPort.decide(request, options);
   },
   executeAction,
   pageMatches,
@@ -189,6 +192,7 @@ const withTarget = (action: Action, target: Target): Action => {
     case "type":
     case "submit":
     case "select":
+    case "key":
       return { ...action, target };
     default:
       return action;
@@ -214,6 +218,21 @@ function focusObservedRef(epoch: number, ref: string): boolean {
   (element as HTMLElement).focus();
   const root = element.getRootNode() as Document | ShadowRoot;
   return root.activeElement === element;
+}
+
+function focusedObservedRef(epoch: number): string | undefined {
+  const registry = (
+    globalThis as typeof globalThis & {
+      __jevpilotObserverRegistry?: { epoch: number; refs: Map<string, WeakRef<Element>> };
+    }
+  ).__jevpilotObserverRegistry;
+  if (registry?.epoch !== epoch) return undefined;
+  for (const [ref, weak] of registry.refs) {
+    const element = weak.deref();
+    if (element && (element.getRootNode() as Document | ShadowRoot).activeElement === element)
+      return ref;
+  }
+  return undefined;
 }
 
 function failureDetails(error: unknown): string[] {
@@ -312,6 +331,8 @@ export class OrchestratorSession {
   private readonly actionabilityTimeoutMs: number;
   private readonly decisionLogPath: string | undefined;
   private readonly usageDetail: boolean;
+  private readonly decisionProvider: Provider | undefined;
+  private readonly decisionContextLimit: number | undefined;
   private decisionLogFinalized = false;
   private initialNavigationFailure?: { url: string; failure: string };
   private directory?: string;
@@ -417,6 +438,8 @@ export class OrchestratorSession {
     this.actionabilityTimeoutMs = options.actionabilityTimeoutMs ?? 2_000;
     this.decisionLogPath = options.decisionLogPath;
     this.usageDetail = options.usageDetail === true;
+    this.decisionProvider = options.decisionProvider;
+    this.decisionContextLimit = options.decisionContextLimit;
     this.attach(this.page);
     this.ownedPages.add(this.page);
   }
@@ -524,25 +547,22 @@ export class OrchestratorSession {
       if (isSecret(item)) clean = clean.replaceAll(item.secret_ref, "[REDACTED]");
     return clean;
   }
+  private scrubDeep<T>(value: T): T {
+    if (typeof value === "string") return this.scrub(value) as T;
+    if (Array.isArray(value)) return value.map((item) => this.scrubDeep(item)) as T;
+    if (value && typeof value === "object")
+      return Object.fromEntries(
+        Object.entries(value).map(([key, item]) => [key, this.scrubDeep(item)]),
+      ) as T;
+    return value;
+  }
   private sanitizedObservation(observation: Observation): Observation {
+    const clean = this.scrubDeep(observation);
     return {
-      ...observation,
-      text: this.scrub(observation.text),
-      title: this.scrub(observation.title),
-      url: this.scrub(observation.url),
-      elements: observation.elements.map((item) => {
-        const { value, ...rest } = item;
-        return {
-          ...rest,
-          name: this.scrub(item.name),
-          ...(item.placeholder ? { placeholder: this.scrub(item.placeholder) } : {}),
-          ...(item.inputType === "password"
-            ? { value: value ? "[filled]" : "" }
-            : value !== undefined
-              ? { value: this.scrub(value) }
-              : {}),
-        };
-      }),
+      ...clean,
+      elements: clean.elements.map((item) =>
+        item.inputType === "password" ? { ...item, value: item.value ? "[filled]" : "" } : item,
+      ),
     };
   }
   private question(reason: string, details: Record<string, unknown>): string {
@@ -772,7 +792,7 @@ export class OrchestratorSession {
         this.screenshotWrites.delete(write);
       }
     }
-    return result;
+    return this.scrubDeep(result);
   }
   private async handoff(
     reason: HandoffReason,
@@ -870,6 +890,20 @@ export class OrchestratorSession {
       this.deps.now() - this.invocationStarted >= this.budget.seconds * 1000 ||
       this.decisionTokens >= this.budget.decision_tokens
     );
+  }
+  private async decideWithinBudget(request: DecisionRequest): Promise<DecisionResult> {
+    const remaining = this.budget.seconds * 1000 - (this.deps.now() - this.invocationStarted);
+    if (remaining <= 0) throw new DecisionAbortedError("session budget exhausted");
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), remaining);
+    try {
+      return await this.deps.decide(request, { signal: controller.signal });
+    } catch (error) {
+      if (controller.signal.aborted) throw new DecisionAbortedError("session budget exhausted");
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
   }
   private async sample(
     options: ObserveOptions = {},
@@ -1113,7 +1147,12 @@ export class OrchestratorSession {
   }> {
     let current = sampled ?? (await this.sample());
     if (this.switchPendingPopup()) current = await this.sample();
-    while (this.sampleVersion !== this.navigationVersion) current = await this.sample();
+    for (
+      let retry = 0;
+      retry < 3 && !this.exceeded() && this.sampleVersion !== this.navigationVersion;
+      retry++
+    )
+      current = await this.sample();
     return current;
   }
   private async waitForContent(sampled: {
@@ -1178,7 +1217,7 @@ export class OrchestratorSession {
     // An HTTP error document (a 429 rate limit, a 404) is never evidence of completion, even when
     // its URL matches the assertion.
     if ((this.navigation?.status ?? 0) >= 400) return false;
-    for (;;) {
+    for (let retry = 0; retry < 3; retry++) {
       const current =
         this.sampleVersion === this.navigationVersion
           ? observation
@@ -1203,6 +1242,7 @@ export class OrchestratorSession {
       }
       if (version === this.navigationVersion) return matched;
     }
+    return false;
   }
   private async completion(goalMet: number): Promise<SessionResult> {
     if (this.lastObservation && (await this.verified(this.lastObservation)))
@@ -1238,12 +1278,12 @@ export class OrchestratorSession {
       );
     return this.handoff("uncertain", { completionMissing: missing });
   }
-  private async resolveValue(key: string): Promise<string | SessionResult> {
+  private async resolveValue(key: string, targetUrl?: string): Promise<string | SessionResult> {
     const item = this.values[key];
     if (item === undefined) return this.handoff("needs_values");
     if (!isSecret(item)) return item;
     try {
-      const origin = new URL(this.lastObservation?.url ?? "").origin;
+      const origin = new URL(targetUrl ?? "").origin;
       if (!item.origins.includes(origin)) return this.handoff("needs_values");
       let value: string;
       if (item.secret_ref.startsWith("env:")) {
@@ -1280,7 +1320,11 @@ export class OrchestratorSession {
       return this.handoff("uncertain", {
         missing: `unknown value key ${JSON.stringify(action.valueKey)}. Provided keys: ${Object.keys(this.values).join(", ") || "none"}`,
       });
-    const value = await this.resolveValue(key);
+    const target = this.lastObservation?.elements.find((item) => item.ref === action.target.ref);
+    const targetUrl = target
+      ? (target.origin ?? (target.framePath ? undefined : this.lastObservation?.url))
+      : undefined;
+    const value = await this.resolveValue(key, targetUrl);
     return typeof value === "string" ? { [action.valueKey]: value } : value;
   }
   private async answerDialog(
@@ -1293,7 +1337,10 @@ export class OrchestratorSession {
     if (dialog.kind === "prompt" && accept) {
       if (!valueKey)
         return this.handoff("needs_values", { fields: [{ label: "dialog response" }] });
-      const resolved = await this.resolveValue(valueKey);
+      const resolved = await this.resolveValue(
+        valueKey,
+        dialog.url ?? (dialog.frame === "child" ? undefined : this.lastObservation?.url),
+      );
       if (typeof resolved !== "string") return resolved;
       promptText = resolved;
     }
@@ -1488,7 +1535,8 @@ export class OrchestratorSession {
       }
     }
     const submitButton =
-      action.kind === "submit" && element?.formId
+      (action.kind === "submit" || (action.kind === "key" && action.name === "Enter")) &&
+      element?.formId
         ? observation.elements.find(
             (item) =>
               item.formId === element.formId &&
@@ -1500,7 +1548,9 @@ export class OrchestratorSession {
         : undefined;
     const matched = submitButton
       ? irreversibleActionMatch(submitButton)
-      : element && irreversibleActionMatch(element);
+      : action.kind === "key"
+        ? undefined
+        : element && irreversibleActionMatch(element);
     if (matched && !this.constraints.allow_irreversible && !approved) {
       this.pendingGatedAction = {
         action,
@@ -1844,6 +1894,10 @@ export class OrchestratorSession {
           credentialsAvailable: this.hasOriginSecret(observation.url),
           ...(this.lastFilled ? { lastFilled: this.lastFilled } : {}),
           ...(this.thresholds ? { thresholds: this.thresholds } : {}),
+          ...(this.decisionProvider ? { provider: this.decisionProvider } : {}),
+          ...(this.decisionContextLimit !== undefined
+            ? { contextLimit: this.decisionContextLimit }
+            : {}),
         };
         const { state, questions, reductions } = this.deps.buildDecisionState(context);
         const decisionRequest: DecisionRequest = { state, questions };
@@ -1852,9 +1906,14 @@ export class OrchestratorSession {
         this.callDecisions++;
         this.sessionDecisions++;
         try {
-          decision = await this.deps.decide(decisionRequest);
+          decision = await this.decideWithinBudget(decisionRequest);
         } catch (error) {
           await this.logDecisionFailure(decisionRequest, error, decisionStarted);
+          if (
+            this.exceeded() ||
+            (error instanceof DecisionAbortedError && error.message === "session budget exhausted")
+          )
+            return this.result("BUDGET_EXHAUSTED", "budget_exhausted");
           return this.decisionFailure(error, reductions);
         }
         this.decideMs += Math.max(decision.latencyMs, this.deps.now() - decisionStarted);
@@ -1880,9 +1939,15 @@ export class OrchestratorSession {
           this.callDecisions++;
           this.sessionDecisions++;
           try {
-            checked = await this.deps.decide(checkRequest);
+            checked = await this.decideWithinBudget(checkRequest);
           } catch (error) {
             await this.logDecisionFailure(checkRequest, error, checkStarted);
+            if (
+              this.exceeded() ||
+              (error instanceof DecisionAbortedError &&
+                error.message === "session budget exhausted")
+            )
+              return this.result("BUDGET_EXHAUSTED", "budget_exhausted");
             return this.decisionFailure(error, [], true);
           }
           checkedDecision = checked;
@@ -2274,6 +2339,25 @@ export class OrchestratorSession {
           ]);
           if (!focused) return this.handoff("uncertain", { missing: "target cannot be focused" });
         }
+        if (action.kind === "key" && action.name === "Enter") {
+          const focusedRef =
+            op.ref ??
+            (await this.page
+              .callIsolated(focusedObservedRef, [sampled.observation.epoch])
+              .catch(() => undefined));
+          const focused = sampled.observation.elements.find(
+            (element) => element.ref === focusedRef,
+          );
+          if (focused?.formId)
+            action = {
+              ...action,
+              target: {
+                epoch: sampled.observation.epoch,
+                ref: focused.ref,
+                fingerprint: focused.fingerprint,
+              },
+            };
+        }
         const beforeStep = this.steps;
         const outcome = await this.execute(
           action,
@@ -2410,8 +2494,8 @@ export class OrchestratorSession {
     return Promise.all(
       [...this.ownedPages].map(async (page) => ({
         tab_id: page.id,
-        url: await (page.targetUrl?.() ?? page.callIsolated(() => location.href, [])).catch(
-          () => "",
+        url: this.scrub(
+          await (page.targetUrl?.() ?? page.callIsolated(() => location.href, [])).catch(() => ""),
         ),
         selected: page === this.page,
       })),

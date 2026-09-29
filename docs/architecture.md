@@ -64,7 +64,7 @@ try {
 }
 ```
 
-Engine profile types are defined in src/browser/profiles.ts. Supported profiles are desktop-chrome, server-plain and attach. Browsers run headless by default; desktop-chrome can run headed (off-screen on Windows) and server-plain can run under Xvfb, which the Docker runtime image does. A headless launch probes the browser once and passes `--user-agent` and `--screen-info` so that its user agent, client hints and screen size match headed Chrome. The current package registers only the CDP driver.
+Engine profile types are defined in src/browser/profiles.ts. Supported profiles are desktop-chrome, server-plain and attach. Browsers run headless by default; desktop-chrome can run headed (off-screen on Windows) and server-plain can run under Xvfb, which the Docker runtime image does. A headless launch probes the browser once and passes `--user-agent` so that its user agent and client hints match headed Chrome; `--screen-info` makes the screen at least as large as the window. The current package registers only the CDP driver.
 
 To add a driver, implement EngineDriver and register it with EngineRegistry. The driver must:
 

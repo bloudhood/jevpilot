@@ -24,14 +24,14 @@ Returns a session result.
 
 Continues an existing session after a handoff.
 
-| Input              | Type                             | Required | Meaning                                                                     |
-| ------------------ | -------------------------------- | -------- | --------------------------------------------------------------------------- |
-| session            | non-empty string                 | Yes      | Session ID returned by browser_run.                                         |
-| values             | record of strings or secret refs | No       | Add or replace supplied values.                                             |
-| goal_update        | non-empty string                 | No       | Update the goal.                                                            |
-| allow_irreversible | boolean                          | No       | Approve the pending irreversible action. Approval is scoped to that action. |
-| allowed_domains    | array of non-empty strings       | No       | Extend or refine the session domain allowlist within any server allowlist.  |
-| dialog             | object                           | No       | Required accept boolean and optional value_key for a prompt response.       |
+| Input              | Type                             | Required | Meaning                                                                                              |
+| ------------------ | -------------------------------- | -------- | ---------------------------------------------------------------------------------------------------- |
+| session            | non-empty string                 | Yes      | Session ID returned by browser_run.                                                                  |
+| values             | record of strings or secret refs | No       | Add or replace supplied values.                                                                      |
+| goal_update        | non-empty string                 | No       | Update the goal.                                                                                     |
+| allow_irreversible | boolean                          | No       | Approve the pending irreversible action. Approval is scoped to that action.                          |
+| allowed_domains    | array of non-empty strings       | No       | Add domains to the session allowlist within any server allowlist; it cannot narrow the session list. |
+| dialog             | object                           | No       | Required accept boolean and optional value_key for a prompt response.                                |
 
 Returns a session result.
 
@@ -76,6 +76,8 @@ Operation fields:
 | name         | string                     | No       | Key name for key or press_key.                                                                            |
 | key          | string                     | No       | Alias of name for key or press_key.                                                                       |
 | accept       | boolean                    | No       | Accept or dismiss a dialog.                                                                               |
+
+Native select observations show the first 20 labels and how many are omitted; selection checks all live options.
 
 Returns a session result with a fresh snapshot.
 

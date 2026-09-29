@@ -15,9 +15,12 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - run: npm run format:check
+      - run: npm run typecheck
       - run: npm run test:unit
         env:
-          JEVPILOT_SKIP_BROWSER: '1'
+          JEVPILOT_SKIP_BROWSER: "1"
+      - run: npm run build
   docker:
     runs-on: ubuntu-latest
     steps:

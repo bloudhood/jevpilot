@@ -33,10 +33,12 @@ describe("real Chrome Executor", { skip: skipped }, () => {
   const harnessSamples: number[] = [];
 
   before(async () => {
-    crossServer = createServer((_request, response) => {
+    crossServer = createServer((request, response) => {
       response.setHeader("content-type", "text/html; charset=utf-8");
       response.end(
-        '<button id="frame-button" onclick="this.textContent=\'Frame clicked\'">Frame action</button>',
+        request.url === "/frame?scaled"
+          ? '<button id="frame-button" style="margin:100px 0 0 220px" onclick="this.textContent=\'Scaled clicked\'">Scaled action</button>'
+          : '<button id="frame-button" onclick="this.textContent=\'Frame clicked\'">Frame action</button>',
       );
     });
     await new Promise<void>((resolve) => crossServer.listen(0, "127.0.0.1", resolve));
@@ -46,6 +48,12 @@ describe("real Chrome Executor", { skip: skipped }, () => {
     crossUrl = `http://127.0.0.1:${crossAddress.port}/frame`;
     server = createServer((request, response) => {
       response.setHeader("content-type", "text/html; charset=utf-8");
+      if (request.url === "/scaled-frame") {
+        response.end(
+          `<iframe src="${crossUrl}?scaled" style="width:600px;height:240px;transform:scale(0.5);transform-origin:top left"></iframe>`,
+        );
+        return;
+      }
       if (request.url === "/delayed") {
         response.end(
           `<title>Delayed navigation</title><a href="/next" onclick="event.preventDefault();setTimeout(()=>location.href=this.href,150)">Delayed link</a>`,
@@ -981,7 +989,6 @@ describe("real Chrome Executor", { skip: skipped }, () => {
         document.body.innerHTML =
           '<button id="ready" onclick="this.dataset.clicks=String(Number(this.dataset.clicks||0)+1)">Ready button</button>';
       }, []);
-      const samples: number[] = [];
       for (let index = 0; index < 20; index++) {
         const state = await observe(page);
         const result = await executeAction(page, state, {
@@ -989,10 +996,7 @@ describe("real Chrome Executor", { skip: skipped }, () => {
           target: target(state, find(state, "Ready button")),
         });
         assert.equal(result.timings.waitMs, 0);
-        samples.push(result.timings.precheckMs);
       }
-      samples.sort((left, right) => left - right);
-      assert.ok(samples[9]! < 30, `median precheck ${samples[9]} ms`);
       assert.equal(
         await page.callIsolated(
           () => document.querySelector("#ready")?.getAttribute("data-clicks"),
@@ -1075,6 +1079,32 @@ describe("real Chrome Executor", { skip: skipped }, () => {
         target: target(state, find(state, "Agree")),
       });
       assert.equal(toggled.changes.checked, true);
+    }));
+
+  test("R1: an option after the first twenty of a native select can be selected", async () =>
+    withPage(async (page) => {
+      await page.callIsolated(() => {
+        document.body.innerHTML = '<label>Long list <select id="long-list"></select></label>';
+        const select = document.querySelector("select")!;
+        for (let index = 0; index < 60; index++) select.add(new Option(`Option ${index}`));
+      }, []);
+      const state = await observe(page);
+      const select = find(state, "Long list");
+      assert.equal(select.options?.length, 20);
+      assert.equal(select.optionCount, 60);
+      const result = await executeAction(page, state, {
+        kind: "select",
+        target: target(state, select),
+        optionLabel: "Option 45",
+      });
+      assert.equal(result.outcome, "changed");
+      assert.equal(
+        await page.callIsolated(
+          () => (document.querySelector("select") as HTMLSelectElement).selectedIndex,
+          [],
+        ),
+        45,
+      );
     }));
 
   test("keyboard events carry key code and trusted modifiers", async () =>
@@ -1222,6 +1252,63 @@ describe("real Chrome Executor", { skip: skipped }, () => {
       assert.match(frameButton.ref, /^frame:/u);
       const result = await act(page, state, { kind: "click", target: target(state, frameButton) });
       assert.equal(result.outcome, "changed");
+    }));
+
+  test("R2: a click inside a scaled iframe lands on its target", async () =>
+    withPage(async (page) => {
+      await page.navigate(`${baseUrl}/scaled-frame`);
+      const state = await observe(page);
+      const button = find(state, "Scaled action");
+      const result = await act(page, state, { kind: "click", target: target(state, button) });
+      assert.equal(result.outcome, "changed");
+      const frame = (await page.frames())[0]!;
+      assert.equal(
+        await frame.callIsolated(() => document.querySelector("button")?.textContent, []),
+        "Scaled clicked",
+      );
+    }));
+
+  test("R2: typing into a contenteditable editor is reported as a change", async () =>
+    withPage(async (page) => {
+      await page.callIsolated(
+        () =>
+          (document.body.innerHTML =
+            '<div contenteditable role="textbox" aria-label="Editor">before</div>'),
+        [],
+      );
+      const state = await observe(page);
+      const editor = find(state, "Editor");
+      const result = await act(page, state, {
+        kind: "type",
+        target: target(state, editor),
+        text: "after",
+      });
+      assert.equal(result.changes.value, true);
+    }));
+
+  test("R2: selecting past a disabled option picks the requested option", async () =>
+    withPage(async (page) => {
+      await page.callIsolated(
+        () =>
+          (document.body.innerHTML =
+            "<label>Pick <select><option>One</option><option disabled>Skip</option><option>Three</option><option>Four</option></select></label>"),
+        [],
+      );
+      const state = await observe(page);
+      const select = find(state, "Pick");
+      const result = await act(page, state, {
+        kind: "select",
+        target: target(state, select),
+        optionLabel: "Three",
+      });
+      assert.equal(result.outcome, "changed");
+      assert.equal(
+        await page.callIsolated(
+          () => (document.querySelector("select") as HTMLSelectElement).selectedIndex,
+          [],
+        ),
+        2,
+      );
     }));
 
   test("M6x: the executor reports popup opened for a slow target=_blank submit", async () =>

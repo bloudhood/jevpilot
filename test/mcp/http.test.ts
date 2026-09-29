@@ -81,6 +81,36 @@ async function connect(port: number): Promise<Client> {
 const data = (result: unknown): Record<string, unknown> =>
   (result as { structuredContent: Record<string, unknown> }).structuredContent;
 
+test("R1: rejected HTTP requests do not leave MCP transports behind", async () => {
+  const app = createServer(fakeMcpDeps());
+  const created: ReturnType<typeof app.createMcpServer>[] = [];
+  const http = await startHttpServer(
+    { host: "127.0.0.1", port: 0, token, allowedHosts: [], allowedOrigins: [] },
+    () => {
+      const server = app.createMcpServer();
+      created.push(server);
+      return server;
+    },
+  );
+  try {
+    assert.equal((await send(http.port, { body: "{" })).status, 400);
+    assert.equal((await send(http.port, { body: "x".repeat(4 * 1024 * 1024 + 1) })).status, 413);
+    assert.equal(created.length, 0);
+    const rejected = await send(http.port, {
+      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }),
+    });
+    assert.equal(rejected.status, 400);
+    assert.equal(rejected.headers["mcp-session-id"], undefined);
+    assert.equal(created.length, 1);
+    assert.equal(created[0]?.isConnected(), false);
+    assert.equal((await send(http.port, { body: initialize("valid") })).status, 200);
+    assert.equal(created.length, 2);
+  } finally {
+    await http.close();
+    await app.close();
+  }
+});
+
 test("O4: http transport settings are validated at startup", () => {
   assert.equal(parseHttpConfig({}).transport, "stdio");
   assert.throws(() => parseHttpConfig({ JEVPILOT_TRANSPORT: "sse" }), /JEVPILOT_TRANSPORT/u);

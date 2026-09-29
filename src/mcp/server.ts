@@ -133,6 +133,8 @@ export type McpDeps = {
   engines: EngineRegistry;
   engine?: string;
   decisionPort?: DecisionPort;
+  decisionProvider?: SessionOptions["decisionProvider"];
+  decisionContextLimit?: number;
   orchestrator?: Partial<SessionDeps>;
   clock?: () => number;
   launchOptions?: LaunchOptions;
@@ -188,6 +190,7 @@ export function createServer(deps: McpDeps): {
   const screenshotDirs = new Map<string, string>();
   const creatingScreenshotDirs = new Map<string, Promise<string>>();
   const busySessions = new Map<string, number>();
+  const sessionChains = new Map<string, Promise<unknown>>();
   const disconnectedSessions = new Set<string>();
   // Closing aborts in-flight work (the session reports session_closed); screenshot writers re-check
   // this set after every await so nothing is created for a session once its close has started.
@@ -329,13 +332,25 @@ export function createServer(deps: McpDeps): {
   ): Promise<T> => {
     if (closing || closingSessions.has(instance.id) || !sessions.has(instance.id))
       throw new McpUserError("Session is closing.");
-    busySessions.set(instance.id, (busySessions.get(instance.id) ?? 0) + 1);
+    const prior = sessionChains.get(instance.id) ?? Promise.resolve();
+    const run = prior.then(async () => {
+      if (closing || closingSessions.has(instance.id) || !sessions.has(instance.id))
+        throw new McpUserError("Session is closing.");
+      busySessions.set(instance.id, (busySessions.get(instance.id) ?? 0) + 1);
+      try {
+        return await operation();
+      } finally {
+        const remaining = (busySessions.get(instance.id) ?? 1) - 1;
+        if (remaining) busySessions.set(instance.id, remaining);
+        else busySessions.delete(instance.id);
+      }
+    });
+    const tail = run.catch(() => {});
+    sessionChains.set(instance.id, tail);
     try {
-      return await operation();
+      return await run;
     } finally {
-      const remaining = (busySessions.get(instance.id) ?? 1) - 1;
-      if (remaining) busySessions.set(instance.id, remaining);
-      else busySessions.delete(instance.id);
+      if (sessionChains.get(instance.id) === tail) sessionChains.delete(instance.id);
     }
   };
   const noDecisionPort = (): SessionResult => ({
@@ -516,6 +531,10 @@ export function createServer(deps: McpDeps): {
                       }
                     : {}),
                   goal: input.goal,
+                  ...(deps.decisionProvider ? { decisionProvider: deps.decisionProvider } : {}),
+                  ...(deps.decisionContextLimit !== undefined
+                    ? { decisionContextLimit: deps.decisionContextLimit }
+                    : {}),
                   ...(deps.usageDetail ? { usageDetail: true } : {}),
                   ...deps.sessionOptions,
                   navigationTimeoutMs,
@@ -573,7 +592,7 @@ export function createServer(deps: McpDeps): {
                   ...deps.orchestrator,
                   ...(deps.clock ? { now: deps.clock } : {}),
                   ...(deps.decisionPort
-                    ? { decide: (request) => deps.decisionPort!.decide(request) }
+                    ? { decide: (request, options) => deps.decisionPort!.decide(request, options) }
                     : {}),
                 },
               );
@@ -879,7 +898,11 @@ export function createServer(deps: McpDeps): {
         );
         screenshotDirs.clear();
         if (launching) await launching.catch(() => {});
-        await browser?.close();
+        try {
+          await browser?.close();
+        } catch (error) {
+          process.stderr.write(`jevpilot-mcp browser close failed: ${String(error)}\n`);
+        }
         await server.close();
       })();
       return closePromise;

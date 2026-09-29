@@ -21,6 +21,128 @@ const data = (result: unknown): Record<string, unknown> =>
 const text = (result: unknown): string =>
   (result as { content: { text: string }[] }).content[0]!.text;
 
+test("R2: result url, title and tab urls are redacted", async () => {
+  const secret = "env:JEVPILOT_SECRET_R2";
+  const deps = fakeMcpDeps();
+  deps.orchestrator!.observe = async () => ({
+    ...fakeObservation("r2"),
+    url: `http://fixture.test/${secret}`,
+    title: `Account ${secret}`,
+  });
+  const app = createServer(deps);
+  const client = new Client({ name: "r2-redaction", version: "1" });
+  const [left, right] = InMemoryTransport.createLinkedPair();
+  await app.server.connect(right);
+  await client.connect(left);
+  try {
+    const run = data(
+      await client.callTool({
+        name: "browser_run",
+        arguments: {
+          goal: "inspect",
+          values: { password: { secret_ref: secret, origins: ["http://fixture.test"] } },
+        },
+      }),
+    );
+    assert.equal(String(run.url).includes(secret), false);
+    assert.equal(String(run.title).includes(secret), false);
+    const page = deps.pages[0]!;
+    Object.assign(page, { targetUrl: async () => `http://fixture.test/${secret}` });
+    const tabs = data(
+      await client.callTool({
+        name: "browser_tabs",
+        arguments: { session: run.session, action: "list" },
+      }),
+    );
+    assert.equal(JSON.stringify(tabs).includes(secret), false);
+    assert.match(JSON.stringify(tabs), /\[REDACTED\]/u);
+  } finally {
+    await client.close();
+    await app.close();
+  }
+});
+
+test("R1: concurrent calls on one session run one after another", async () => {
+  const deps = fakeMcpDeps();
+  let active = 0;
+  let overlapped = false;
+  let navigations = 0;
+  const app = createServer(deps);
+  const client = new Client({ name: "r1", version: "1" });
+  const [left, right] = InMemoryTransport.createLinkedPair();
+  await app.server.connect(right);
+  await client.connect(left);
+  try {
+    const first = data(await client.callTool({ name: "browser_run", arguments: { goal: "x" } }));
+    const id = first.session as string;
+    const page = deps.pages[0]!;
+    const navigate = page.navigate.bind(page);
+    page.navigate = async (url, options) => {
+      active++;
+      navigations++;
+      if (active > 1) overlapped = true;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      try {
+        return await navigate(url, options);
+      } finally {
+        active--;
+      }
+    };
+    const results = await Promise.all([
+      client.callTool({
+        name: "browser_navigate",
+        arguments: { session: id, url: "http://fixture.test/one" },
+      }),
+      client.callTool({
+        name: "browser_navigate",
+        arguments: { session: id, url: "http://fixture.test/two" },
+      }),
+    ]);
+    assert.ok(results.every((result) => !result.isError));
+    assert.equal(navigations, 2);
+    assert.equal(overlapped, false);
+  } finally {
+    await client.close();
+    await app.close();
+  }
+});
+
+test("R1: shutdown closes the MCP transport even when the browser close fails", async () => {
+  const deps = fakeMcpDeps();
+  let closed = false;
+  deps.engines = new EngineRegistry({ default: { driver: "close-failure", profile: {} } });
+  deps.engines.register({
+    kind: "close-failure",
+    launch: async () => ({
+      engine: { name: "close-failure", driver: "close-failure", stealthLevel: "high" },
+      capabilities: new FakePageHandle().capabilities,
+      selfCheck: undefined,
+      connected: true,
+      onDisconnected: () => () => {},
+      newPage: async () => new FakePageHandle(),
+      pages: () => [],
+      close: async () => {
+        closed = true;
+        throw new Error("browser close failed");
+      },
+    }),
+  });
+  const app = createServer(deps);
+  const client = new Client({ name: "r1-close", version: "1" });
+  const [left, right] = InMemoryTransport.createLinkedPair();
+  await app.server.connect(right);
+  await client.connect(left);
+  try {
+    await client.callTool({ name: "browser_run", arguments: { goal: "x" } });
+    await app.close();
+    assert.equal(closed, true);
+    assert.equal(app.server.isConnected(), false);
+  } finally {
+    await client.close();
+    await app.close();
+  }
+});
+
 test("O2.5: the MCP server passes JEVPILOT_USAGE_DETAIL to sessions", async () => {
   const deps = fakeMcpDeps();
   deps.usageDetail = true;

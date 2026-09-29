@@ -10,6 +10,7 @@ import type {
 import type { PageHandle } from "../engine/types.ts";
 import { FrameGoneError } from "../engine/types.ts";
 import { installObserverLibrary } from "./page-library.ts";
+import { mapFramePoint, mapFrameRect } from "./frame-geometry.ts";
 import type { ObserverPageLibrary } from "./page-library.ts";
 
 export function pageSnapshot(options: SnapshotOptions): Omit<Observation, "timings"> {
@@ -238,7 +239,13 @@ export function pageSnapshot(options: SnapshotOptions): Omit<Observation, "timin
         /pass(?:word)?|pwd|otp|cvv|cvc/iu.test(
           `${element.getAttribute("name") ?? ""} ${element.id}`,
         ));
-    const rawValue = secret ? (input.value ? "***" : "") : input.value;
+    const rawValue = secret
+      ? input.value
+        ? "***"
+        : ""
+      : (element as HTMLElement).isContentEditable && role === "textbox"
+        ? (element as HTMLElement).innerText
+        : input.value;
     const value = typeof rawValue === "string" ? clean(rawValue, 60) : undefined;
     const displayName =
       name && clean(element.getAttribute("placeholder")) === name && value
@@ -273,6 +280,7 @@ export function pageSnapshot(options: SnapshotOptions): Omit<Observation, "timin
     const item: Observation["elements"][number] = {
       ref,
       framePath,
+      origin: location.origin,
       fingerprint,
       role,
       name: displayName,
@@ -622,17 +630,10 @@ export function resolveRef(
       return result.rect
         ? {
             ...result,
-            rect: {
-              ...result.rect,
-              x: result.rect.x + frame.offset.x,
-              y: result.rect.y + frame.offset.y,
-            },
+            rect: mapFrameRect(result.rect, frame.offset),
             ...(result.clickPoint
               ? {
-                  clickPoint: {
-                    x: result.clickPoint.x + frame.offset.x,
-                    y: result.clickPoint.y + frame.offset.y,
-                  },
+                  clickPoint: mapFramePoint(result.clickPoint, frame.offset),
                 }
               : {}),
           }
@@ -708,17 +709,10 @@ export function waitForRef(
       return result.rect
         ? {
             ...result,
-            rect: {
-              ...result.rect,
-              x: result.rect.x + frame.offset.x,
-              y: result.rect.y + frame.offset.y,
-            },
+            rect: mapFrameRect(result.rect, frame.offset),
             ...(result.clickPoint
               ? {
-                  clickPoint: {
-                    x: result.clickPoint.x + frame.offset.x,
-                    y: result.clickPoint.y + frame.offset.y,
-                  },
+                  clickPoint: mapFramePoint(result.clickPoint, frame.offset),
                 }
               : {}),
           }
@@ -1089,13 +1083,22 @@ export function resolveRefInPage(
       : {}),
     ...(secret
       ? { ...(valueChanged === undefined ? {} : { valueChanged }) }
-      : { value: control.value ?? "" }),
+      : {
+          value:
+            (element as HTMLElement).isContentEditable &&
+            (element.getAttribute("role") === "textbox" || element.hasAttribute("contenteditable"))
+              ? (element as HTMLElement).innerText.slice(0, 60)
+              : (control.value ?? ""),
+        }),
     checked: control.checked ?? false,
     ...(element.localName === "select"
       ? {
           selectedIndex: (element as HTMLSelectElement).selectedIndex,
           selectedLabel: (element as HTMLSelectElement).selectedOptions[0]?.label ?? "",
           optionLabels: [...(element as HTMLSelectElement).options].map((option) => option.label),
+          optionDisabled: [...(element as HTMLSelectElement).options].map(
+            (option) => option.disabled,
+          ),
           selectPopup:
             !(element as HTMLSelectElement).multiple && (element as HTMLSelectElement).size <= 1,
         }

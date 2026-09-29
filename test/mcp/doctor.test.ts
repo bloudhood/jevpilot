@@ -215,3 +215,15 @@ test("O8: an invalid environment setting fails the config check instead of crash
   assert.match(result.checks[1]?.detail ?? "", /JEVPILOT_NETWORK_GUARD/u);
   assert.equal(result.ok, false);
 });
+
+test("R2: doctor fails the configuration check for an unsupported engine", async () => {
+  const result = await runDoctor({
+    env: { JEVPILOT_ENGINE: "unsupported" },
+    noBrowser: true,
+    out: () => {},
+    ...temp,
+  });
+  assert.equal(result.checks.find((check) => check.name === "config")?.status, "fail");
+  assert.match(result.checks.find((check) => check.name === "config")?.detail ?? "", /CDP driver/u);
+  assert.equal(result.ok, false);
+});

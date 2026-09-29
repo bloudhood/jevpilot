@@ -127,6 +127,7 @@ describe("M5a real Chrome takeover", { skip: skipped }, () => {
   let browser: BrowserHandle;
   let directory: string;
   let base: string;
+  let replacingFormSubmissions = 0;
   before(async () => {
     server = createServer((request, response) => {
       if (request.url === "/slow-resource") {
@@ -135,6 +136,7 @@ describe("M5a real Chrome takeover", { skip: skipped }, () => {
         return;
       }
       if (request.url?.startsWith("/delayed-results")) {
+        replacingFormSubmissions++;
         response.setHeader("content-type", "text/html; charset=utf-8");
         setTimeout(() => response.end("<title>Results</title><h1>Search results</h1>"), 300);
         return;
@@ -657,6 +659,7 @@ describe("M5a real Chrome takeover", { skip: skipped }, () => {
   test("M6e: a form submit that replaces the document during the action does not fail the run", async () => {
     const { session } = await opened("/replacing-form", ["127.0.0.1"], 2000);
     try {
+      replacingFormSubmissions = 0;
       const initial = await session.observe();
       running(
         await session.act([{ action: "type", ref: refFor(initial, "Query"), text: "paper" }]),
@@ -664,6 +667,7 @@ describe("M5a real Chrome takeover", { skip: skipped }, () => {
       const filled = await session.observe();
       const result = await session.act([{ action: "click", ref: refFor(filled, "Search") }]);
       assert.ok(["RUNNING", "DONE_VERIFIED", "DONE_UNVERIFIED"].includes(result.status));
+      assert.equal(replacingFormSubmissions, 1, "the form must reach the fixture server");
     } finally {
       await session.close();
     }

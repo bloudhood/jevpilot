@@ -35,7 +35,7 @@ export function enforceLimits(
   }
 
   const limits = defaultLimits[provider];
-  const totalLimit = override ?? limits.total;
+  const totalLimit = Math.min(override ?? limits.total, limits.total);
   if (estimateTokens(request) > totalLimit) {
     throw new ContextLimitError(`context exceeds ${totalLimit} tokens`);
   }

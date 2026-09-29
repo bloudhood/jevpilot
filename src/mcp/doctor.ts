@@ -102,6 +102,10 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorResu
   let loaded: Awaited<ReturnType<typeof loadMcpProfile>> | undefined;
   let parsedDecision: DecisionConfig | undefined;
   try {
+    if (env.JEVPILOT_ENGINE && env.JEVPILOT_ENGINE !== "cdp")
+      throw new Error(
+        "Only the CDP driver is registered. Choose a browser profile with JEVPILOT_PROFILE_FILE.",
+      );
     const transport = parseHttpConfig(env);
     const navigation = parseNavigationTimeout(env.JEVPILOT_NAVIGATION_TIMEOUT_MS);
     const actionability = parseActionabilityTimeout(env.JEVPILOT_ACTIONABILITY_TIMEOUT_MS);

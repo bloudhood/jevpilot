@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
+import { realpath } from "node:fs/promises";
 import { test } from "node:test";
 import type { DecisionResult } from "../../src/decision/types.ts";
 import { MockDecider } from "../../src/decision/mock.ts";
@@ -22,6 +23,7 @@ import type { Action, ActionResult } from "../../src/executor/types.ts";
 import { sessionResultSchema } from "../../src/orchestrator/result.ts";
 import type { Observation, ObservedElement } from "../../src/observer/types.ts";
 import { buildDecisionState, interpret, type PolicyOutcome } from "../../src/policy/index.ts";
+import { estimateTokens, enforceLimits } from "../../src/decision/limits.ts";
 import {
   OrchestratorSession,
   type SessionDeps,
@@ -817,6 +819,191 @@ function fixture(
   const session = new OrchestratorSession({ page, goal: "finish", ...overrides.options }, deps);
   return { page, session, clock, seen };
 }
+
+test("R2: Enter in a field of an irreversible form waits for approval", async () => {
+  const field = element("Order quantity", "textbox", {
+    tag: "input",
+    inputType: "text",
+    formId: "order",
+  });
+  const buy = element("Place order", "button", { ref: "e2", formId: "order" });
+  const search = element("Search", "textbox", { tag: "input", inputType: "search", ref: "e3" });
+  const make = (allow = false) =>
+    fixture({
+      observations: [observation([field, buy, search])],
+      options: { constraints: { allow_irreversible: allow }, budget: { steps: 1 } },
+    });
+  const gated = make();
+  const allowed = make(true);
+  const outside = make();
+  try {
+    gated.page.results.push(true);
+    const blocked = await gated.session.act([
+      { action: "press_key", key: "Enter", ref: field.ref },
+    ]);
+    assert.equal(blocked.status, "CONFIRM_REQUIRED");
+    assert.equal(gated.seen.actions.length, 0);
+    const approved = await gated.session.resume({ allow_irreversible: true });
+    assert.equal(approved.status, "BUDGET_EXHAUSTED");
+    assert.equal(gated.seen.actions[0]?.kind, "key");
+    assert.equal((gated.seen.actions[0] as { name: string }).name, "Enter");
+    allowed.page.results.push(true);
+    assert.notEqual(
+      (await allowed.session.act([{ action: "key", name: "Enter", ref: field.ref }])).status,
+      "CONFIRM_REQUIRED",
+    );
+    assert.equal(allowed.seen.actions[0]?.kind, "key");
+    outside.page.results.push(true);
+    assert.notEqual(
+      (await outside.session.act([{ action: "key", name: "Enter", ref: search.ref }])).status,
+      "CONFIRM_REQUIRED",
+    );
+    assert.equal(outside.seen.actions[0]?.kind, "key");
+  } finally {
+    await gated.session.close();
+    await allowed.session.close();
+    await outside.session.close();
+  }
+});
+
+test("R2: page text copied from a secret is redacted in every observation field", async () => {
+  const secret = "secret-r2-marker";
+  const select = element("Choice", "select", {
+    tag: "select",
+    options: [secret],
+    optionLabel: secret,
+    containerText: secret,
+    identityName: secret,
+  });
+  const link = element("View", "link", { ref: "e2", href: `http://example.test/${secret}` });
+  const seen: string[] = [];
+  const caseUnderTest = fixture({
+    observations: [observation([select, link])],
+    buildDecisionState: (input) => {
+      seen.push(JSON.stringify(input.observation));
+      return { state: { observation: input.observation }, questions: {}, reductions: [] };
+    },
+    decide: async (request) => {
+      seen.push(JSON.stringify(request));
+      return decision;
+    },
+    outcomes: [{ type: "handoff", reason: "uncertain", source: "code", details: {} }],
+  });
+  (caseUnderTest.session as unknown as { secretLiterals: Set<string> }).secretLiterals.add(secret);
+  try {
+    await caseUnderTest.session.run();
+    assert.equal(seen.length, 2);
+    assert.ok(seen.every((item) => !item.includes(secret) && item.includes("[REDACTED]")));
+  } finally {
+    await caseUnderTest.session.close();
+  }
+});
+
+test("R2: session result url and title are redacted", async () => {
+  const secret = "secret-r2-marker";
+  const page = observation([], "start", `http://example.test/${secret}`);
+  page.title = `Account ${secret}`;
+  const caseUnderTest = fixture({ observations: [page] });
+  (caseUnderTest.session as unknown as { secretLiterals: Set<string> }).secretLiterals.add(secret);
+  Object.assign(caseUnderTest.page, { targetUrl: async () => page.url });
+  try {
+    const result = await caseUnderTest.session.observe();
+    assert.equal(result.url.includes(secret), false);
+    assert.equal(result.title.includes(secret), false);
+    caseUnderTest.page.navigationResult = { failure: "disconnected", headers: {} };
+    const navigation = await caseUnderTest.session.navigate(page.url);
+    assert.equal(navigation.url.includes(secret), false);
+    assert.equal((await caseUnderTest.session.listTabs())[0]?.url.includes(secret), false);
+  } finally {
+    await caseUnderTest.session.close();
+  }
+});
+
+test("R2: an upload hands the checked real path to the page", async () => {
+  const root = await mkdtemp(join(tmpdir(), "jevpilot-r2-upload-"));
+  const previous = process.env.JEVPILOT_UPLOAD_DIR;
+  process.env.JEVPILOT_UPLOAD_DIR = root;
+  const file = join(root, "file.txt");
+  await writeFile(file, "upload");
+  await mkdir(join(root, "sub"));
+  const caseUnderTest = fixture({
+    observations: [observation([element("File", "textbox", { tag: "input", inputType: "file" })])],
+  });
+  try {
+    await caseUnderTest.session.act([
+      { action: "upload", ref: "e1", paths: [`${root}${sep}sub${sep}..${sep}file.txt`] },
+    ]);
+    const upload = caseUnderTest.page.calls.find((call) => call.name === "setInputFiles");
+    assert.deepEqual(upload?.args[1], [await realpath(file)]);
+  } finally {
+    await caseUnderTest.session.close();
+    await rm(root, { recursive: true, force: true });
+    if (previous === undefined) delete process.env.JEVPILOT_UPLOAD_DIR;
+    else process.env.JEVPILOT_UPLOAD_DIR = previous;
+  }
+});
+
+test("R2: a decision call stops when the session budget runs out", async () => {
+  const caseUnderTest = fixture({
+    options: { budget: { seconds: 0.04 } },
+    decide: async (_request, options) =>
+      new Promise<DecisionResult>((_resolve, reject) => {
+        options?.signal?.addEventListener("abort", () => reject(new Error("aborted")), {
+          once: true,
+        });
+      }),
+  });
+  try {
+    const started = performance.now();
+    const result = await caseUnderTest.session.run();
+    assert.equal(result.status, "BUDGET_EXHAUSTED");
+    assert.ok(performance.now() - started < 500);
+  } finally {
+    await caseUnderTest.session.close();
+  }
+});
+
+test("R2: decision state is reduced against the configured provider and context limit", async () => {
+  const items = [
+    element("Choice", "select", {
+      tag: "select",
+      ref: "select",
+      options: Array.from({ length: 8 }, (_, option) => `Choice ${option} ${"a".repeat(3000)}`),
+    }),
+    ...Array.from({ length: 200 }, (_, index) =>
+      element(`Target ${index} ${"a".repeat(500)}`, "button", {
+        ref: `e${index}`,
+        inViewport: index < 5,
+      }),
+    ),
+  ];
+  const page = observation(items);
+  const run = async (decisionProvider: "typesafe" | "custom", decisionContextLimit?: number) => {
+    let built: ReturnType<typeof buildDecisionState> | undefined;
+    const caseUnderTest = fixture({
+      observations: [page],
+      options: { decisionProvider, ...(decisionContextLimit ? { decisionContextLimit } : {}) },
+      buildDecisionState: (input) => (built = buildDecisionState(input)),
+      decide: async () => decision,
+      outcomes: [{ type: "handoff", reason: "uncertain", source: "code", details: {} }],
+    });
+    try {
+      await caseUnderTest.session.run();
+      return built!;
+    } finally {
+      await caseUnderTest.session.close();
+    }
+  };
+  const typesafe = await run("typesafe");
+  assert.ok(
+    estimateTokens({ state: typesafe.state, questions: typesafe.questions }) > 32_768,
+    String(estimateTokens({ state: typesafe.state, questions: typesafe.questions })),
+  );
+  enforceLimits({ state: typesafe.state, questions: typesafe.questions }, "typesafe");
+  const limited = await run("typesafe", 8000);
+  assert.ok(limited.reductions.length > 0);
+  enforceLimits({ state: limited.state, questions: limited.questions }, "typesafe", 8000);
+});
 
 test("O2.5: usage detail is absent by default", async () => {
   const instance = fixture();
@@ -4709,5 +4896,111 @@ test("close and idle reclaim close the original tab and switched popup", async (
     } finally {
       await originalExecute.close();
     }
+  }
+});
+
+test("R1: a secret is not typed into a field of a cross-origin frame", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "jevpilot-r1-secret-"));
+  const secretFile = join(directory, "value.txt");
+  await writeFile(secretFile, "fixture-secret", "utf8");
+  const previousDirectory = process.env.JEVPILOT_SECRETS_DIR;
+  process.env.JEVPILOT_SECRETS_DIR = directory;
+  const field = element("Password", "textbox", {
+    tag: "input",
+    inputType: "password",
+    framePath: "frame:child/",
+    origin: "http://child.test",
+  });
+  const instance = fixture({
+    observations: [observation([field])],
+    options: {
+      values: { password: { secret_ref: `file:${secretFile}`, origins: ["http://example.test"] } },
+    },
+    execute: () => {
+      throw new Error("cross-origin field was typed");
+    },
+  });
+  try {
+    const result = await instance.session.act([
+      { action: "type", ref: "e1", value_key: "password" },
+    ]);
+    assert.equal(result.status, "NEEDS_VALUES");
+    assert.equal(instance.seen.actions.length, 0);
+  } finally {
+    await instance.session.close();
+    if (previousDirectory === undefined) delete process.env.JEVPILOT_SECRETS_DIR;
+    else process.env.JEVPILOT_SECRETS_DIR = previousDirectory;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("R1: a secret is not sent to a prompt opened by a cross-origin frame", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "jevpilot-r1-prompt-"));
+  const secretFile = join(directory, "value.txt");
+  await writeFile(secretFile, "fixture-secret", "utf8");
+  const previousDirectory = process.env.JEVPILOT_SECRETS_DIR;
+  process.env.JEVPILOT_SECRETS_DIR = directory;
+  const instance = fixture({
+    options: {
+      values: { password: { secret_ref: `file:${secretFile}`, origins: ["http://example.test"] } },
+    },
+  });
+  const handled: string[] = [];
+  instance.page.handleDialog = async (_accept, text) => {
+    handled.push(text ?? "");
+  };
+  try {
+    assert.equal((await instance.session.observe()).status, "RUNNING");
+    instance.page.emit("dialog", {
+      kind: "prompt",
+      message: "Password",
+      defaultPrompt: "",
+      url: "http://child.test/prompt",
+      frame: "child",
+    });
+    const result = await instance.session.act([
+      { action: "dialog", accept: true, value_key: "password" },
+    ]);
+    assert.equal(result.status, "NEEDS_VALUES");
+    assert.deepEqual(handled, []);
+    instance.page.emit("dialog", {
+      kind: "prompt",
+      message: "Password",
+      defaultPrompt: "",
+      url: "http://example.test/prompt",
+    });
+    const allowed = await instance.session.act([
+      { action: "dialog", accept: true, value_key: "password" },
+    ]);
+    assert.equal(allowed.status, "RUNNING");
+    assert.deepEqual(handled, ["fixture-secret"]);
+  } finally {
+    await instance.session.close();
+    if (previousDirectory === undefined) delete process.env.JEVPILOT_SECRETS_DIR;
+    else process.env.JEVPILOT_SECRETS_DIR = previousDirectory;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("R1: a page that keeps navigating does not hold browser_run past its budget", async () => {
+  const clock = { now: 0 };
+  let samples = 0;
+  let instance: ReturnType<typeof fixture>;
+  instance = fixture({
+    clock,
+    options: { budget: { seconds: 1 } },
+    observe: async () => {
+      samples++;
+      clock.now += 400;
+      instance.page.emit("navigated", { url: "http://example.test/again" });
+      return observation();
+    },
+  });
+  try {
+    const result = await instance.session.run();
+    assert.equal(result.status, "BUDGET_EXHAUSTED");
+    assert.ok(samples <= 5, `sampled ${samples} times`);
+  } finally {
+    await instance.session.close();
   }
 });

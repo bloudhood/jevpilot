@@ -90,10 +90,16 @@ function setDateLikeInPage(epoch: number, ref: string, value: string): boolean {
   );
 }
 
-export function selectKeySteps(current: number, target: number): ("ArrowUp" | "ArrowDown")[] {
-  return Array.from({ length: Math.abs(target - current) }, () =>
-    target < current ? "ArrowUp" : "ArrowDown",
-  );
+export function selectKeySteps(
+  current: number,
+  target: number,
+  disabled: boolean[] = [],
+): ("ArrowUp" | "ArrowDown")[] {
+  const traversed = Array.from(
+    { length: Math.abs(target - current) },
+    (_, step) => current + (target < current ? -1 : 1) * (step + 1),
+  ).filter((index) => !disabled[index]);
+  return traversed.map(() => (target < current ? "ArrowUp" : "ArrowDown"));
 }
 
 export function diffState(
@@ -520,14 +526,22 @@ export async function executeAction(
       case "select": {
         if (!(await send(page.click(x, y)))) {
           const index = previous?.optionLabels?.indexOf(action.optionLabel) ?? -1;
-          if (index < 0 || previous?.selectedIndex === undefined) {
+          if (
+            index < 0 ||
+            previous?.selectedIndex === undefined ||
+            previous.optionDisabled?.[index]
+          ) {
             inputMs = performance.now() - inputStart;
             return result("select-failed");
           }
           if (previous.selectPopup === false)
             await focusRef(page, action.target.epoch, action.target.ref);
           let dialogOpened = false;
-          for (const key of selectKeySteps(previous.selectedIndex, index)) {
+          for (const key of selectKeySteps(
+            previous.selectedIndex,
+            index,
+            previous.optionDisabled,
+          )) {
             if (await send(page.key(key))) {
               dialogOpened = true;
               break;

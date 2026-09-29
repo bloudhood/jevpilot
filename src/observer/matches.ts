@@ -1,4 +1,4 @@
-import type { PageHandle } from "../engine/types.ts";
+import { FrameGoneError, type PageHandle } from "../engine/types.ts";
 
 export type PageAssertions = {
   text_present?: string;
@@ -12,9 +12,44 @@ export function matchesInPage(
   const roots: (Document | ShadowRoot)[] = [document];
   const candidates: Element[] = [];
   const text: string[] = [];
+  const visible = (element: Element, requireSize = true): boolean => {
+    if (typeof element.getBoundingClientRect !== "function") return true;
+    if (!element.isConnected) return false;
+    for (let current: Element | null = element; current;) {
+      if (current.hasAttribute("inert") || current.getAttribute("aria-hidden") === "true")
+        return false;
+      const style = getComputedStyle(current);
+      if (
+        style.display === "none" ||
+        style.visibility === "hidden" ||
+        style.visibility === "collapse" ||
+        style.opacity === "0"
+      )
+        return false;
+      const parent: Element | null = current.parentElement;
+      const root = current.getRootNode();
+      current = parent ?? (root instanceof ShadowRoot ? root.host : null);
+    }
+    if (!requireSize) return true;
+    const rect = element.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  };
   for (let index = 0; index < roots.length; index++) {
     const root = roots[index]!;
-    text.push(root instanceof Document ? (root.body?.innerText ?? "") : (root.textContent ?? ""));
+    if (root instanceof Document) text.push(root.body?.innerText ?? "");
+    else {
+      const parts: string[] = [];
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const parent = node.parentElement ?? root.host;
+        if (!visible(parent, false) || ["SCRIPT", "STYLE"].includes(parent.tagName)) continue;
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        if ([...range.getClientRects()].some((rect) => rect.width > 0 && rect.height > 0))
+          parts.push(node.textContent ?? "");
+      }
+      text.push(parts.join(" "));
+    }
     for (const element of root.querySelectorAll("*")) {
       candidates.push(element);
       if (element.shadowRoot) roots.push(element.shadowRoot);
@@ -92,7 +127,8 @@ export function matchesInPage(
       clean(element.getAttribute("alt")) ||
       clean(element.textContent) ||
       clean(element.getAttribute("title"));
-    return accessibleName === name;
+    // Visibility walks the ancestors' computed styles, so it runs only for a role and name match.
+    return accessibleName === name && visible(element);
   });
 }
 
@@ -101,5 +137,30 @@ export async function pageMatches(
   assertions: PageAssertions,
   pendingEchoTexts: string[] = [],
 ): Promise<boolean> {
-  return page.callIsolated(matchesInPage, [assertions, pendingEchoTexts]);
+  // Child frames are listed only when the main frame does not satisfy an assertion.
+  let frames: Awaited<ReturnType<PageHandle["frames"]>> | undefined;
+  for (const assertion of [
+    ...(assertions.text_present ? [{ text_present: assertions.text_present }] : []),
+    ...(assertions.element_present ? [{ element_present: assertions.element_present }] : []),
+  ]) {
+    if (await page.callIsolated(matchesInPage, [assertion, pendingEchoTexts])) continue;
+    let matched = false;
+    frames ??= await page.frames();
+    for (const frame of frames) {
+      try {
+        if (await frame.callIsolated(matchesInPage, [assertion, pendingEchoTexts])) {
+          matched = true;
+          break;
+        }
+      } catch (error) {
+        if (
+          !(error instanceof FrameGoneError) &&
+          !(error instanceof Error && error.name === "EvaluationError")
+        )
+          throw error;
+      }
+    }
+    if (!matched) return false;
+  }
+  return true;
 }

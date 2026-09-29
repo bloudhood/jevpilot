@@ -131,16 +131,6 @@ export function startHttpServer(
       reject(res, 404, "Unknown session");
       return;
     }
-    if (!entry) {
-      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: randomUUID });
-      const server = createMcpServer();
-      entry = { transport, server, touched: Date.now() };
-      transport.onclose = () => {
-        if (transport.sessionId) sessions.delete(transport.sessionId);
-      };
-      await server.connect(transport as never);
-    }
-    entry.touched = Date.now();
     let body: unknown;
     if (req.method === "POST") {
       const chunks: Buffer[] = [];
@@ -149,7 +139,7 @@ export function startHttpServer(
         size += Buffer.byteLength(chunk);
         if (size > 4 * 1024 * 1024) {
           reject(res, 413, "Payload too large");
-          req.destroy();
+          req.resume();
           return;
         }
         chunks.push(Buffer.from(chunk));
@@ -163,8 +153,27 @@ export function startHttpServer(
         }
       }
     }
-    await entry.transport.handleRequest(req, res, body);
-    if (entry.transport.sessionId) sessions.set(entry.transport.sessionId, entry);
+    if (!entry) {
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: randomUUID });
+      const server = createMcpServer();
+      entry = { transport, server, touched: Date.now() };
+      transport.onclose = () => {
+        if (transport.sessionId) sessions.delete(transport.sessionId);
+      };
+      try {
+        await server.connect(transport as never);
+      } catch (error) {
+        await transport.close().catch(() => {});
+        throw error;
+      }
+    }
+    entry.touched = Date.now();
+    try {
+      await entry.transport.handleRequest(req, res, body);
+    } finally {
+      if (entry.transport.sessionId) sessions.set(entry.transport.sessionId, entry);
+      else await entry.transport.close().catch(() => {});
+    }
   };
   httpServer = createServer((req, res) => {
     void handler(req, res).catch(() => {

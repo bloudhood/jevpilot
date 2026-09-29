@@ -1,7 +1,13 @@
 import { parseResponse, prepareRequest } from "./adapters.ts";
 import { CircuitBreaker } from "./breaker.ts";
 import type { DecisionConfig } from "./config.ts";
-import { DecisionAbortedError, DecisionConfigError, DecisionRequestError } from "./errors.ts";
+import {
+  DecisionAbortedError,
+  DecisionConfigError,
+  DecisionRequestError,
+  DecisionTimeoutError,
+  DecisionTransportError,
+} from "./errors.ts";
 import { enforceLimits } from "./limits.ts";
 import { defaultDeps, sendWithRetry } from "./transport.ts";
 import type { TransportDeps } from "./transport.ts";
@@ -62,23 +68,29 @@ export function createDecisionPort(
         enforceLimits(resolvedRequest, config.provider, config.contextLimit);
         const wire = prepareRequest(config, resolvedRequest);
 
-        const response = await breaker.run(async () => {
-          const sent = await sendWithRetry(
-            wire.url,
-            wire.body,
-            config.apiKey,
-            config.timeoutMs,
-            config.maxRetries,
-            transport,
-            options?.signal,
-            config.maxRetryAfterMs ?? 30000,
-            config.firstTimeoutMs,
-          );
-          attempts = sent.attempts;
-          const providerResponse = parseResponse(config, sent.body);
-          validateAnswers(resolvedRequest.questions, providerResponse.answers);
-          return providerResponse;
-        });
+        const response = await breaker.run(
+          async () => {
+            const sent = await sendWithRetry(
+              wire.url,
+              wire.body,
+              config.apiKey,
+              config.timeoutMs,
+              config.maxRetries,
+              transport,
+              options?.signal,
+              config.maxRetryAfterMs ?? 30000,
+              config.firstTimeoutMs,
+            );
+            attempts = sent.attempts;
+            const providerResponse = parseResponse(config, sent.body);
+            return providerResponse;
+          },
+          (error) =>
+            error instanceof DecisionTimeoutError ||
+            (error instanceof DecisionTransportError &&
+              (error.status === undefined || error.status === 429 || error.status >= 500)),
+        );
+        validateAnswers(resolvedRequest.questions, response.answers);
 
         inputTokens = response.usage.input_tokens;
         model = response.model;

@@ -385,6 +385,8 @@ export class BrowserInstance {
   downloadPath: string | undefined;
   managedDownloadPath: string | undefined;
   managedBrowserKey: string | undefined;
+  attached = false;
+  targetDiscoveryEnabled = false;
   private closed = false;
   private readonly isolatedContexts = new Set<string>();
   private readonly windowSize: { width: number; height: number } | undefined;
@@ -516,11 +518,33 @@ export class BrowserInstance {
         await Promise.all(
           [...this.sessions]
             .filter((session) => session !== this.keepAlive)
-            .map((session) => session.close()),
+            .map((session) =>
+              session.close().catch((error: unknown) => {
+                if (!this.client.isDisconnected) throw error;
+              }),
+            ),
         );
-        await this.keepAlive?.close();
+        await this.keepAlive?.close().catch((error: unknown) => {
+          if (!this.client.isDisconnected) throw error;
+        });
       } finally {
-        await Promise.all([...this.isolatedContexts].map((id) => this.disposeContext(id)));
+        try {
+          await Promise.all(
+            [...this.isolatedContexts].map((id) =>
+              this.disposeContext(id).catch((error: unknown) => {
+                if (!this.client.isDisconnected) throw error;
+              }),
+            ),
+          );
+        } finally {
+          try {
+            if (this.attached && this.targetDiscoveryEnabled && !this.client.isDisconnected)
+              await this.client.call("Target.setDiscoverTargets", { discover: false });
+          } finally {
+            if (this.attached && this.downloadPath && !this.client.isDisconnected)
+              await this.client.call("Browser.setDownloadBehavior", { behavior: "default" });
+          }
+        }
       }
     } finally {
       this.client.close();
@@ -670,6 +694,7 @@ export async function launchBrowser(
       version?.userAgent,
       probedIdentity?.userAgentMetadata,
     );
+    browser.attached = profile.kind === "attach";
     const identity = browserIdentity(url);
     if (profile.kind !== "attach") {
       managedBrowserKey = identity;
@@ -742,6 +767,7 @@ export async function launchBrowser(
     }
     return browser;
   } catch (cause) {
+    await browser?.close().catch(() => {});
     client?.close();
     if (child) await stopBrowser(child, deps).catch(() => {});
     if (displayChild) await stopBrowser(displayChild, deps).catch(() => {});

@@ -1083,3 +1083,101 @@ test("isolated call opening its own dialog rejects promptly and settles later CD
     await host.close();
   }
 });
+
+test("R1: a failed Fetch.enable closes the page instead of leaving it unguarded", async () => {
+  const sent: Message[] = [];
+  const fake = await fakeCdp((message, send) => {
+    sent.push(message);
+    const method = String(message.method);
+    if (method === "Fetch.enable")
+      send({ id: message.id, error: { code: -32000, message: "Fetch unavailable" } });
+    else if (method === "Target.createTarget")
+      send({ id: message.id, result: { targetId: "unguarded" } });
+    else if (method === "Target.attachToTarget")
+      send({ id: message.id, result: { sessionId: "s1" } });
+    else send({ id: message.id, result: {} });
+  });
+  const browser = await createCdpDriver().launch(
+    { kind: "attach", cdpUrl: fake.url },
+    { selfCheck: false, networkGuard: { mode: "metadata", extraBlocked: [] } },
+  );
+  try {
+    await assert.rejects(browser.newPage(), /failed to enable network guard/u);
+    assert.ok(
+      sent.some(
+        (message) =>
+          message.method === "Target.closeTarget" &&
+          (message.params as { targetId?: string }).targetId === "unguarded",
+      ),
+    );
+    assert.equal(browser.pages().length, 0);
+  } finally {
+    await browser.close();
+    await fake.close();
+  }
+});
+
+test("R1: a popup that fails to attach leaves no page behind", async () => {
+  const host = await fixture({
+    frameCall: (message, send) => {
+      if (message.sessionId === "popup" && message.method === "Runtime.callFunctionOn") {
+        send({ id: message.id, error: { code: -32000, message: "popup world failed" } });
+        return true;
+      }
+      return false;
+    },
+  });
+  try {
+    host.event("Target.targetCreated", {
+      targetInfo: { targetId: "popup", type: "page", openerId: "page" },
+    });
+    await waitUntil(() =>
+      host.sent.some(
+        (message) =>
+          message.method === "Target.closeTarget" &&
+          (message.params as { targetId?: string }).targetId === "popup",
+      ),
+    );
+    assert.equal(host.browser.pages().length, 1);
+    host.event(
+      "Page.javascriptDialogOpening",
+      { type: "alert", message: "late popup alert", defaultPrompt: "" },
+      "popup",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(
+      host.sent.some(
+        (message) =>
+          message.method === "Page.handleJavaScriptDialog" && message.sessionId === "popup",
+      ),
+      false,
+      "a failed popup must not retain its dialog subscription",
+    );
+  } finally {
+    await host.close();
+  }
+});
+
+test("R1: download progress without a managed start is not kept forever", async () => {
+  const host = await fixture({
+    manageDownloads: true,
+    networkGuard: { mode: "off", extraBlocked: [] },
+  });
+  const states: string[] = [];
+  try {
+    host.page.on("download", (event) => states.push(event.state));
+    host.event("Page.frameNavigated", { frame: { id: "main", url: "http://fixture.test/" } }, "s1");
+    for (let index = 0; index < 129; index++)
+      host.event("Browser.downloadProgress", { guid: `orphan-${index}`, state: "completed" });
+    host.event("Browser.downloadWillBegin", {
+      guid: "orphan-0",
+      frameId: "main",
+      url: "http://fixture.test/file",
+      suggestedFilename: "file",
+    });
+    await waitUntil(() => states.length > 0);
+    assert.deepEqual(states, ["started"]);
+  } finally {
+    await host.close();
+  }
+});

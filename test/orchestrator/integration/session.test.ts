@@ -71,10 +71,22 @@ function answersFor(
 
 describe("real Chrome orchestrator local fixture", { skip: skipped }, () => {
   let server: Server;
+  let crossServer: Server;
   let browser: BrowserHandle;
   let directory: string;
   let base: string;
   before(async () => {
+    crossServer = createServer((_request, response) => {
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      response.end(
+        '<p>Cross-frame completion</p><button style="display:none">Hidden frame completion</button>',
+      );
+    });
+    await new Promise<void>((resolve) => crossServer.listen(0, "127.0.0.1", resolve));
+    const crossAddress = crossServer.address();
+    if (!crossAddress || typeof crossAddress === "string")
+      throw new Error("cross fixture has no port");
+    const crossUrl = `http://localhost:${crossAddress.port}/result`;
     server = createServer((request, response) => {
       response.setHeader("content-type", "text/html; charset=utf-8");
       const path = (request.url ?? "/").split("?")[0];
@@ -91,6 +103,7 @@ describe("real Chrome orchestrator local fixture", { skip: skipped }, () => {
         return;
       }
       const pages: Record<string, string> = {
+        "/frame-success": `<title>Frame success</title><button onclick="document.querySelector('iframe').src='${crossUrl}'">Complete</button><iframe></iframe>`,
         "/search": '<title>Search</title><a href="/result">Search result</a>',
         "/result": "<title>Result</title><h1>Found result</h1>",
         "/form":
@@ -182,6 +195,7 @@ describe("real Chrome orchestrator local fixture", { skip: skipped }, () => {
   after(async () => {
     await browser?.close();
     if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (crossServer) await new Promise<void>((resolve) => crossServer.close(() => resolve()));
     if (directory)
       await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   });
@@ -553,6 +567,27 @@ describe("real Chrome orchestrator local fixture", { skip: skipped }, () => {
       assert.equal((await session.observe()).status, "DONE_VERIFIED");
     } finally {
       await session.close();
+    }
+  });
+  test("R2: a success check finds text inside a cross-origin iframe", async () => {
+    const session = await opened("/frame-success", scripted({ op: "CLICK", target: "e1" }), {
+      success: {
+        text_present: "Cross-frame completion",
+        element_present: { role: "button", name: "Complete" },
+      },
+    });
+    try {
+      assert.equal((await session.run()).status, "DONE_VERIFIED");
+    } finally {
+      await session.close();
+    }
+    const hidden = await opened("/frame-success", scripted({ op: "CLICK", target: "e1" }), {
+      success: { element_present: { role: "button", name: "Hidden frame completion" } },
+    });
+    try {
+      assert.notEqual((await hidden.run()).status, "DONE_VERIFIED");
+    } finally {
+      await hidden.close();
     }
   });
 });

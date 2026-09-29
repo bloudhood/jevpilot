@@ -10,7 +10,7 @@ export type Action =
   | { kind: "scroll"; direction: "up" | "down" }
   | { kind: "back" }
   | { kind: "wait" }
-  | { kind: "key"; name: string };
+  | { kind: "key"; name: string; target?: Target };
 
 export const actionOutcomes = [
   "changed",

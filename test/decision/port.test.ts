@@ -3,13 +3,92 @@ import { describe, test } from "node:test";
 import {
   ContextLimitError,
   createDecisionPort,
+  CircuitOpenError,
   DecisionAbortedError,
   DecisionRequestError,
+  DecisionTransportError,
   InvalidAnswerError,
   loadDecisionConfig,
 } from "../../src/index.ts";
 import type { DecisionRequest } from "../../src/index.ts";
 import { answers, config, fixture, jsonResponse, request } from "./helpers.ts";
+
+test("R1: invalid answers and aborts do not open the decision circuit", async () => {
+  let calls = 0;
+  const port = createDecisionPort(
+    { ...config("typesafe"), breakerThreshold: 2, maxRetries: 0 },
+    {
+      fetch: async () => {
+        calls++;
+        return jsonResponse({ ...(fixture("typesafe") as object), answers: {} });
+      },
+    },
+  );
+  await assert.rejects(port.decide(request), InvalidAnswerError);
+  await assert.rejects(port.decide(request), InvalidAnswerError);
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(port.decide(request, { signal: controller.signal }), DecisionAbortedError);
+  await assert.rejects(port.decide(request), InvalidAnswerError);
+  assert.equal(calls, 3);
+
+  let abortCalls = 0;
+  let entered = () => {};
+  const abortPort = createDecisionPort(
+    { ...config("typesafe"), breakerThreshold: 2, maxRetries: 0 },
+    {
+      fetch: async (_url, init) => {
+        abortCalls++;
+        if (abortCalls > 2) return jsonResponse(fixture("typesafe"));
+        entered();
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), {
+            once: true,
+          });
+        });
+      },
+    },
+  );
+  for (let index = 0; index < 2; index++) {
+    const controller = new AbortController();
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const pending = abortPort.decide(request, { signal: controller.signal });
+    await started;
+    controller.abort();
+    await assert.rejects(pending, DecisionAbortedError);
+  }
+  assert.equal((await abortPort.decide(request)).attempts, 1);
+  assert.equal(abortCalls, 3);
+
+  let clientErrors = 0;
+  const clientErrorPort = createDecisionPort(
+    { ...config("typesafe"), breakerThreshold: 2, maxRetries: 0 },
+    {
+      fetch: async () =>
+        jsonResponse(++clientErrors <= 2 ? {} : fixture("typesafe"), clientErrors <= 2 ? 401 : 200),
+    },
+  );
+  await assert.rejects(clientErrorPort.decide(request), DecisionTransportError);
+  await assert.rejects(clientErrorPort.decide(request), DecisionTransportError);
+  assert.equal((await clientErrorPort.decide(request)).attempts, 1);
+
+  let serverErrors = 0;
+  const serverErrorPort = createDecisionPort(
+    { ...config("typesafe"), breakerThreshold: 2, maxRetries: 0 },
+    {
+      fetch: async () => {
+        serverErrors++;
+        return jsonResponse({}, 503);
+      },
+    },
+  );
+  await assert.rejects(serverErrorPort.decide(request), DecisionTransportError);
+  await assert.rejects(serverErrorPort.decide(request), DecisionTransportError);
+  await assert.rejects(serverErrorPort.decide(request), CircuitOpenError);
+  assert.equal(serverErrors, 2);
+});
 
 describe("createDecisionPort", () => {
   test("fills a missing request model from config before sending", async () => {

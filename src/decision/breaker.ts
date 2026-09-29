@@ -15,7 +15,10 @@ export class CircuitBreaker {
     this.cooldownMs = cooldownMs;
   }
 
-  async run<T>(operation: () => Promise<T>): Promise<T> {
+  async run<T>(
+    operation: () => Promise<T>,
+    countFailure: (error: unknown) => boolean = () => true,
+  ): Promise<T> {
     if (this.openedAt !== undefined) {
       if (this.clock.now() - this.openedAt < this.cooldownMs || this.probing) {
         throw new CircuitOpenError("decision circuit open");
@@ -29,8 +32,10 @@ export class CircuitBreaker {
       this.openedAt = undefined;
       return result;
     } catch (error) {
-      this.failures++;
-      if (this.failures >= this.threshold) this.openedAt = this.clock.now();
+      if (countFailure(error)) {
+        this.failures++;
+        if (this.failures >= this.threshold) this.openedAt = this.clock.now();
+      }
       throw error;
     } finally {
       this.probing = false;

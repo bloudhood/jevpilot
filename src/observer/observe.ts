@@ -2,18 +2,19 @@ import type { PageHandle } from "../engine/types.ts";
 import { pageSnapshot, waitForNavigationQuiet } from "./page-snapshot.ts";
 import { installObserverLibrary } from "./page-library.ts";
 import { FrameGoneError, PageUnresponsiveError } from "../engine/types.ts";
+import { mapFrameRect } from "./frame-geometry.ts";
 import type { MarkerGeometry, Observation, ObservedElement, ObserveOptions } from "./types.ts";
 export { formatObservation, shortenHref } from "./format.ts";
 
 function mapChildGeometry<T extends MarkerGeometry>(
   matches: T[],
   prefix: string,
-  offset: { x: number; y: number },
+  offset: { x: number; y: number; scaleX?: number; scaleY?: number },
   viewport: Observation["viewport"],
   parentVisible: boolean,
 ): T[] {
   return matches.map((match) => {
-    const rect = { ...match.rect, x: match.rect.x + offset.x, y: match.rect.y + offset.y };
+    const rect = mapFrameRect(match.rect, offset);
     return {
       ...match,
       framePath: `${prefix}${match.framePath}`,
@@ -281,11 +282,7 @@ export async function observe(
       frameHashes.push(`${frame.id}:${child.pageHash}`);
       const prefix = `frame:${frame.id}@${child.epoch}/`;
       for (const element of child.elements) {
-        const rect = {
-          ...element.rect,
-          x: element.rect.x + frame.offset.x,
-          y: element.rect.y + frame.offset.y,
-        };
+        const rect = mapFrameRect(element.rect, frame.offset);
         snapshot.elements.push({
           ...element,
           ref: `${prefix}${element.ref}`,
@@ -293,11 +290,7 @@ export async function observe(
           rect,
           ...(element.clickRect
             ? {
-                clickRect: {
-                  ...element.clickRect,
-                  x: element.clickRect.x + frame.offset.x,
-                  y: element.clickRect.y + frame.offset.y,
-                },
+                clickRect: mapFrameRect(element.clickRect, frame.offset),
               }
             : {}),
           inViewport:

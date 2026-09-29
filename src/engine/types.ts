@@ -62,6 +62,8 @@ export type PageEvents = {
     kind: "alert" | "confirm" | "prompt" | "beforeunload";
     message: string;
     defaultPrompt: string;
+    url?: string;
+    frame?: "main" | "child";
   };
   popupOpening: { targetId: string };
   popup: PageHandle;
@@ -77,7 +79,7 @@ export type InputResult = { dialog?: PageEvents["dialog"] };
 
 export interface FrameHandle {
   readonly id: string;
-  readonly offset: { x: number; y: number };
+  readonly offset: { x: number; y: number; scaleX?: number; scaleY?: number };
   callIsolated<A extends unknown[], R>(
     fn: (...args: A) => R | Promise<R>,
     args: A,

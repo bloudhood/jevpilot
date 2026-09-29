@@ -9,6 +9,7 @@ import { findChrome } from "../../../src/browser/launcher.ts";
 import { createCdpDriver } from "../../../src/engine/cdp/driver.ts";
 import type { BrowserHandle, PageHandle } from "../../../src/engine/types.ts";
 import { observe, formatObservation } from "../../../src/observer/observe.ts";
+import { pageMatches } from "../../../src/observer/matches.ts";
 import { resolveRef } from "../../../src/observer/page-snapshot.ts";
 import { estimateTokens } from "../../../src/decision/limits.ts";
 import { buildQuestions } from "../../../src/policy/index.ts";
@@ -392,6 +393,57 @@ describe("real Chrome page Observer", { skip: skipped }, () => {
         "Inert hidden",
       ])
         assert.equal(names.includes(hidden), false, hidden);
+    }));
+  test("R2: a hidden element does not satisfy an element_present success check", async () =>
+    withPage("/", async (page) => {
+      await page.callIsolated(() => {
+        const container = document.createElement("div");
+        container.innerHTML = `
+          <button style="display:none">Hidden display</button>
+          <button style="visibility:hidden">Hidden visibility</button>
+          <div aria-hidden="true"><button>Hidden aria</button></div>
+          <div inert><button>Hidden inert</button></div>
+          <button style="width:0;height:0;padding:0;border:0;overflow:hidden">Hidden zero</button>
+          <button>Visible done</button>`;
+        document.body.append(container);
+      }, []);
+      for (const name of [
+        "Hidden display",
+        "Hidden visibility",
+        "Hidden aria",
+        "Hidden inert",
+        "Hidden zero",
+      ])
+        assert.equal(
+          await pageMatches(page, { element_present: { role: "button", name } }),
+          false,
+          name,
+        );
+      assert.equal(
+        await pageMatches(page, { element_present: { role: "button", name: "Visible done" } }),
+        true,
+      );
+    }));
+  test("R2: hidden shadow-root text does not satisfy a text_present success check", async () =>
+    withPage("/", async (page) => {
+      await page.callIsolated(() => {
+        const host = document.createElement("div");
+        document.body.append(host);
+        host.attachShadow({ mode: "open" }).innerHTML = `
+          <span style="display:none">Hidden shadow display</span>
+          <span style="visibility:hidden">Hidden shadow visibility</span>
+          <span aria-hidden="true">Hidden shadow aria</span>
+          <span inert>Hidden shadow inert</span>
+          <span>Visible shadow result</span>`;
+      }, []);
+      for (const value of [
+        "Hidden shadow display",
+        "Hidden shadow visibility",
+        "Hidden shadow aria",
+        "Hidden shadow inert",
+      ])
+        assert.equal(await pageMatches(page, { text_present: value }), false, value);
+      assert.equal(await pageMatches(page, { text_present: "Visible shadow result" }), true);
     }));
   test("modal overlay and open dialog signals", async () =>
     withPage("/", async (page) => {

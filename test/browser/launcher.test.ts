@@ -18,6 +18,59 @@ import type { CdpClient } from "../../src/browser/cdp/client.ts";
 import { fakeCdp } from "./fake-cdp.ts";
 import { BrowserSession } from "../../src/browser/session.ts";
 
+test("R1: an attach launch that fails its self-check restores the external browser", async () => {
+  const calls: { method: string; params: unknown }[] = [];
+  let fail = true;
+  const fake = await fakeCdp((message, send) => {
+    const method = String(message.method);
+    calls.push({ method, params: message.params });
+    if (method === "Target.createTarget")
+      send({ id: message.id, result: { targetId: "self-check" } });
+    else if (method === "Target.attachToTarget")
+      send({ id: message.id, result: { sessionId: "check-session" } });
+    else if (method === "Page.navigate" && fail)
+      send({ id: message.id, error: { code: -32000, message: "self-check failed" } });
+    else send({ id: message.id, result: {} });
+  });
+  let browser: Awaited<ReturnType<typeof launchBrowser>> | undefined;
+  try {
+    await assert.rejects(
+      launchBrowser(
+        { kind: "attach", cdpUrl: fake.url },
+        { selfCheck: true, manageDownloads: true, timeoutMs: 50 },
+      ),
+    );
+    assert.ok(
+      calls.some(
+        (call) =>
+          call.method === "Target.closeTarget" &&
+          (call.params as { targetId?: string }).targetId === "self-check",
+      ),
+    );
+    const managed = calls.find((call) => call.method === "Browser.setDownloadBehavior")?.params as {
+      downloadPath: string;
+    };
+    assert.ok(managed?.downloadPath);
+    assert.equal((await readdir(tmpdir())).includes(basename(managed.downloadPath)), false);
+    // User decision 2026-09-29: closing an attach session (also after a failed launch) restores the
+    // external browser's default download behaviour.
+    assert.deepEqual(
+      calls
+        .filter((call) => call.method === "Browser.setDownloadBehavior")
+        .map((call) => (call.params as { behavior: string }).behavior),
+      ["allowAndName", "default"],
+    );
+    fail = false;
+    browser = await launchBrowser(
+      { kind: "attach", cdpUrl: fake.url },
+      { selfCheck: false, manageDownloads: true },
+    );
+  } finally {
+    await browser?.close();
+    await fake.close();
+  }
+});
+
 const profile: DesktopChromeProfile = {
   kind: "desktop-chrome",
   display: "headed",
@@ -729,7 +782,7 @@ test("attach without opt-in never changes browser-wide download behavior", async
   }
 });
 
-test("opt-in attach removes only its managed temp directory and never resets behavior", async () => {
+test("R2: closing an attach session resets the external browser's download behavior", async () => {
   const calls: { method: string; params: unknown }[] = [];
   const fake = await fakeCdp((message, send) => {
     calls.push({ method: String(message.method), params: message.params });
@@ -768,10 +821,10 @@ test("opt-in attach removes only its managed temp directory and never resets beh
       .map((call) => call.params as { behavior: string; downloadPath?: string });
     assert.deepEqual(
       behaviors.map((item) => item.behavior),
-      ["allowAndName", "allowAndName"],
+      ["allowAndName", "default", "allowAndName", "default"],
     );
     assert.equal(behaviors[0]?.downloadPath, managed);
-    assert.equal(behaviors[1]?.downloadPath, configured);
+    assert.equal(behaviors[2]?.downloadPath, configured);
     await assert.rejects(
       launchBrowser(
         { kind: "attach", cdpUrl: fake.url, downloadPath: configured },
@@ -779,10 +832,46 @@ test("opt-in attach removes only its managed temp directory and never resets beh
       ),
       BrowserConfigError,
     );
-    assert.equal(calls.filter((call) => call.method === "Browser.setDownloadBehavior").length, 2);
+    assert.equal(calls.filter((call) => call.method === "Browser.setDownloadBehavior").length, 4);
   } finally {
     await attached?.close();
     await fake.close();
     await rm(configured, { recursive: true, force: true });
+  }
+  const failedCalls: { method: string; params: unknown }[] = [];
+  const failing = await fakeCdp((message, send) => {
+    const method = String(message.method);
+    failedCalls.push({ method, params: message.params });
+    if (method === "Target.createTarget")
+      send({ id: message.id, result: { targetId: "failed-check" } });
+    else if (method === "Target.attachToTarget")
+      send({ id: message.id, result: { sessionId: "failed-session" } });
+    else if (method === "Page.navigate")
+      send({ id: message.id, error: { code: -32000, message: "fixture failure" } });
+    else send({ id: message.id, result: {} });
+  });
+  try {
+    await assert.rejects(
+      launchBrowser(
+        { kind: "attach", cdpUrl: failing.url },
+        { selfCheck: true, manageDownloads: true, timeoutMs: 50 },
+      ),
+    );
+    assert.deepEqual(
+      failedCalls
+        .filter((call) => call.method === "Browser.setDownloadBehavior")
+        .map((call) => (call.params as { behavior: string }).behavior),
+      ["allowAndName", "default"],
+    );
+    assert.ok(
+      failedCalls.findIndex((call) => call.method === "Target.closeTarget") <
+        failedCalls.findIndex(
+          (call) =>
+            call.method === "Browser.setDownloadBehavior" &&
+            (call.params as { behavior?: string }).behavior === "default",
+        ),
+    );
+  } finally {
+    await failing.close();
   }
 });

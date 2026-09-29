@@ -421,18 +421,16 @@ class CdpPageHandle implements PageHandle {
     if (frame === "main") this.subscriptions.push(off);
     else this.frameSubscriptions.get(sessionId)?.push(off);
     // Awaited so that no navigation on this session can start before interception is active.
-    await this.browser.client
-      .call(
+    try {
+      await this.browser.client.call(
         "Fetch.enable",
         { patterns: [{ urlPattern: "*", resourceType: "Document", requestStage: "Request" }] },
         sessionId,
-      )
-      .catch((error: unknown) => {
-        this.emit(
-          "error",
-          new BrowserLaunchError("failed to enable network guard", { cause: error }),
-        );
-      });
+      );
+    } catch (cause) {
+      off();
+      throw new BrowserLaunchError("failed to enable network guard", { cause });
+    }
   }
 
   private onFrameNavigated(url: string, loaderId: string | undefined): void {
@@ -481,11 +479,14 @@ class CdpPageHandle implements PageHandle {
       type: PageEvents["dialog"]["kind"];
       message: string;
       defaultPrompt?: string;
+      url?: string;
     };
-    const dialog = {
+    const dialog: PageEvents["dialog"] = {
       kind: event.type,
       message: event.message,
       defaultPrompt: event.defaultPrompt ?? "",
+      ...(event.url ? { url: event.url } : {}),
+      ...(sessionId === this.session.sessionId ? {} : { frame: "child" as const }),
     };
     this.emit("dialog", dialog);
     if (dialog.kind === "alert" && this.autoAcceptAlerts) {
@@ -581,7 +582,17 @@ class CdpPageHandle implements PageHandle {
       sessionId,
     );
     this.frameSubscriptions.get(sessionId)?.push(response);
-    await this.enableNetworkGuard(sessionId, "child");
+    try {
+      await this.enableNetworkGuard(sessionId, "child");
+    } catch (cause) {
+      this.blockDocument(
+        { url: "", address: "network guard unavailable", frame: "child" },
+        parentSessionId,
+        frameId,
+      );
+      await this.browser.client.call("Target.closeTarget", { targetId: frameId }).catch(() => {});
+      throw cause;
+    }
     await this.browser.client.call(
       "Target.setAutoAttach",
       { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
@@ -804,9 +815,14 @@ class CdpPageHandle implements PageHandle {
       else setupTasks.push(walk(frameTree));
     }
     if (hasBudget) await Promise.all(setupTasks);
-    const offsets = new Map<string, { x: number; y: number }>();
-    const offsetTasks = new Map<string, Promise<{ x: number; y: number }>>();
-    const offsetFor = async (id: string): Promise<{ x: number; y: number }> => {
+    const offsets = new Map<string, { x: number; y: number; scaleX?: number; scaleY?: number }>();
+    const offsetTasks = new Map<
+      string,
+      Promise<{ x: number; y: number; scaleX?: number; scaleY?: number }>
+    >();
+    const offsetFor = async (
+      id: string,
+    ): Promise<{ x: number; y: number; scaleX?: number; scaleY?: number }> => {
       if (hasBudget) {
         const pending = offsetTasks.get(id);
         if (pending) return pending;
@@ -816,7 +832,9 @@ class CdpPageHandle implements PageHandle {
       }
       return computeOffset(id);
     };
-    const computeOffset = async (id: string): Promise<{ x: number; y: number }> => {
+    const computeOffset = async (
+      id: string,
+    ): Promise<{ x: number; y: number; scaleX?: number; scaleY?: number }> => {
       const cached = offsets.get(id);
       if (cached) return cached;
       const child = this.children.get(id) ?? this.inProcessFrames.get(id);
@@ -842,7 +860,7 @@ class CdpPageHandle implements PageHandle {
       );
       const objectId = resolved.object.objectId;
       if (!objectId) throw new BrowserLaunchError("iframe owner could not be resolved");
-      let local: { x: number; y: number };
+      let local: { x: number; y: number; scaleX?: number; scaleY?: number; valid?: boolean };
       let timedOut = false;
       try {
         const result = await bounded((timeoutMs) =>
@@ -851,7 +869,7 @@ class CdpPageHandle implements PageHandle {
             {
               objectId,
               functionDeclaration:
-                "function() { const rect = this.getBoundingClientRect(); return { x: rect.x + this.clientLeft, y: rect.y + this.clientTop }; }",
+                "function() { const rect = this.getBoundingClientRect(); const transform = getComputedStyle(this).transform; const matrix = transform === 'none' ? null : new DOMMatrixReadOnly(transform); const scaleX = rect.width / this.offsetWidth; const scaleY = rect.height / this.offsetHeight; return { x: rect.x + this.clientLeft * scaleX, y: rect.y + this.clientTop * scaleY, scaleX, scaleY, valid: this.offsetWidth > 0 && this.offsetHeight > 0 && Number.isFinite(scaleX) && Number.isFinite(scaleY) && (!matrix || (matrix.b === 0 && matrix.c === 0 && matrix.a > 0 && matrix.d > 0)) }; }",
               returnByValue: true,
             },
             parentSessionId,
@@ -877,9 +895,15 @@ class CdpPageHandle implements PageHandle {
             ),
           );
       }
+      if (local.valid === false || !Number.isFinite(local.x) || !Number.isFinite(local.y))
+        throw new BrowserLaunchError("iframe geometry cannot be mapped");
+      const scaleX = (parentOffset.scaleX ?? 1) * (local.scaleX ?? 1);
+      const scaleY = (parentOffset.scaleY ?? 1) * (local.scaleY ?? 1);
       const offset = {
-        x: parentOffset.x + local.x,
-        y: parentOffset.y + local.y,
+        x: parentOffset.x + local.x * (parentOffset.scaleX ?? 1),
+        y: parentOffset.y + local.y * (parentOffset.scaleY ?? 1),
+        ...(scaleX === 1 ? {} : { scaleX }),
+        ...(scaleY === 1 ? {} : { scaleY }),
       };
       offsets.set(id, offset);
       return offset;
@@ -901,7 +925,12 @@ class CdpPageHandle implements PageHandle {
           skipped.add(id);
           return;
         }
-        if (isGoneChildFrameError(error)) return;
+        if (
+          isGoneChildFrameError(error) ||
+          (error instanceof BrowserLaunchError &&
+            error.message === "iframe geometry cannot be mapped")
+        )
+          return;
         throw this.pageCallError(error);
       }
       frames.push({
@@ -1257,6 +1286,7 @@ export function createCdpDriver(deps: LaunchDeps & { lookup?: AddressLookup } = 
         attachingPopups.add(target.targetId);
         void (async () => {
           let popupSession: BrowserSession | undefined;
+          let popupPage: CdpPageHandle | undefined;
           try {
             const initialBlocked = await blockedUrl(target.url ?? "", networkGuard, deps.lookup);
             if (initialBlocked) {
@@ -1267,6 +1297,7 @@ export function createCdpDriver(deps: LaunchDeps & { lookup?: AddressLookup } = 
             const sessionId = await browser.client.attach(target.targetId);
             popupSession = await browser.attachPage(target.targetId, sessionId);
             const page = register(popupSession, contexts.get(opener.id));
+            popupPage = page;
             await page.enableNetworkGuard();
             const currentUrl = await popupSession.targetUrl().catch(() => "");
             if (
@@ -1283,7 +1314,8 @@ export function createCdpDriver(deps: LaunchDeps & { lookup?: AddressLookup } = 
             }
             opener.notifyPopup(page);
           } catch (cause) {
-            if (popupSession) await popupSession.close().catch(() => {});
+            if (popupPage) await popupPage.close().catch(() => {});
+            else if (popupSession) await popupSession.close().catch(() => {});
             else
               await browser.client
                 .call("Target.closeTarget", { targetId: target.targetId })
@@ -1297,6 +1329,7 @@ export function createCdpDriver(deps: LaunchDeps & { lookup?: AddressLookup } = 
           .finally(() => attachingPopups.delete(target.targetId));
       });
       await browser.client.call("Target.setDiscoverTargets", { discover: true });
+      if (browser.attached) browser.targetDiscoveryEnabled = true;
       const pendingDownloadProgress = new Map<
         string,
         { state: "completed" | "canceled"; filePath?: string }
@@ -1360,6 +1393,8 @@ export function createCdpDriver(deps: LaunchDeps & { lookup?: AddressLookup } = 
         const download = downloads.get(event.guid);
         if (event.state === "inProgress") return;
         if (!download) {
+          if (pendingDownloadProgress.size >= 128 && !pendingDownloadProgress.has(event.guid))
+            pendingDownloadProgress.delete(pendingDownloadProgress.keys().next().value!);
           pendingDownloadProgress.set(event.guid, {
             state: event.state,
             ...(event.filePath ? { filePath: event.filePath } : {}),
@@ -1392,8 +1427,13 @@ export function createCdpDriver(deps: LaunchDeps & { lookup?: AddressLookup } = 
             session.browserContextId,
             Boolean(session.browserContextId),
           );
-          await page.enableNetworkGuard();
-          return page;
+          try {
+            await page.enableNetworkGuard();
+            return page;
+          } catch (cause) {
+            await page.close().catch(() => {});
+            throw cause;
+          }
         },
         pages: () =>
           [...pages.values()].filter((page) =>

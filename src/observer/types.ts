@@ -10,6 +10,7 @@ export type ObservedScript = { framePath: string; url: string };
 export type ObservedElement = {
   ref: string;
   framePath: string;
+  origin?: string;
   fingerprint: string;
   role: string;
   name: string;
@@ -123,5 +124,6 @@ export type RefResolution = {
   selectedIndex?: number;
   selectedLabel?: string;
   optionLabels?: string[];
+  optionDisabled?: boolean[];
   selectPopup?: boolean;
 };

@@ -37,8 +37,12 @@ async function main(): Promise<void> {
       "Only the CDP driver is registered. Choose a browser profile with JEVPILOT_PROFILE_FILE.",
     );
   let decisionPort;
+  let decisionProvider: ReturnType<typeof loadDecisionConfig>["provider"] | undefined;
+  let decisionContextLimit: number | undefined;
   if (env.JEV_PROVIDER) {
     const config = loadDecisionConfig(env);
+    decisionProvider = config.provider;
+    decisionContextLimit = config.contextLimit;
     decisionPort = createDecisionPort(config);
     const redacted = redactDecisionConfig(config);
     process.stderr.write(`jevpilot-mcp decision provider: ${String(redacted.provider)}\n`);
@@ -63,6 +67,8 @@ async function main(): Promise<void> {
     isolatedSessions: env.JEVPILOT_ISOLATED_SESSIONS === "1",
     usageDetail: env.JEVPILOT_USAGE_DETAIL === "1",
     ...(decisionPort ? { decisionPort } : {}),
+    ...(decisionProvider ? { decisionProvider } : {}),
+    ...(decisionContextLimit !== undefined ? { decisionContextLimit } : {}),
     ...(allowedDomains?.length ? { allowedDomains } : {}),
     ...(navigationTimeoutMs ? { navigationTimeoutMs } : {}),
     ...(actionabilityTimeoutMs ? { actionabilityTimeoutMs } : {}),

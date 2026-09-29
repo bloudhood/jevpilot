@@ -4,6 +4,25 @@ import { ContextLimitError, enforceLimits, estimateTokens } from "../../src/inde
 import type { DecisionRequest, Provider } from "../../src/index.ts";
 import { request } from "./helpers.ts";
 
+test("R1: JEV_CONTEXT_LIMIT cannot raise the provider's context limit", () => {
+  const large = {
+    ...request,
+    questions: Object.fromEntries(
+      Array.from({ length: 600 }, (_item, index) => [
+        `question_${index}`,
+        {
+          type: "choice" as const,
+          instructions: "x".repeat(300),
+          criteria: { yes: "yes", no: "no" },
+        },
+      ]),
+    ),
+  };
+  assert.ok(estimateTokens(large) > 32768);
+  assert.ok(estimateTokens(large.state) + estimateTokens(large.questions.question_0) < 32768);
+  assert.throws(() => enforceLimits(large, "openrouter", 100_000), ContextLimitError);
+});
+
 function choiceRequest(optionCount: number): DecisionRequest {
   const criteria = Object.fromEntries(
     Array.from({ length: optionCount }, (_value, index) => [String(index), "option"]),

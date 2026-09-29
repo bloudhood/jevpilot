@@ -1,6 +1,6 @@
 # Releasing
 
-This checklist prepares the v0.1.0 GitHub Release. The release assets are the npm pack tarball and its SHA256SUMS.txt checksum file. Do not publish the package to the npm registry or a Docker image as part of this release.
+This checklist prepares a GitHub Release (vX.Y.Z). The release assets are the npm pack tarball and its SHA256SUMS.txt checksum file. Do not publish the package to the npm registry or a Docker image as part of this release.
 
 1. Update the package version and lockfile version. Replace the unreleased date in CHANGELOG.md with the release date and review the user-visible entries.
 2. Update the version in the README install URLs (`releases/download/vX.Y.Z/jevpilot-X.Y.Z.tgz`). Commit these changes; the tag in step 7 must point at this commit.
