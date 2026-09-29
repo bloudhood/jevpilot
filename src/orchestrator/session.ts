@@ -198,6 +198,13 @@ const withTarget = (action: Action, target: Target): Action => {
       return action;
   }
 };
+// The key of a chord such as "Control+Enter", split the way the input layer splits it.
+const keyOf = (name: string): string =>
+  Array.from(name).length === 1 ? name : (name.split("+").pop() ?? "");
+const entersForm = (name: string): boolean => keyOf(name) === "Enter";
+// Enter and Space activate the focused button or link, as a click would.
+const activatesFocus = (name: string): boolean =>
+  entersForm(name) || keyOf(name) === "Space" || keyOf(name) === " ";
 const domainOf = (url: string): string | undefined => {
   try {
     return new URL(url).hostname.toLowerCase();
@@ -1535,7 +1542,9 @@ export class OrchestratorSession {
       }
     }
     const submitButton =
-      (action.kind === "submit" || (action.kind === "key" && action.name === "Enter")) &&
+      (action.kind === "submit" ||
+        (action.kind === "type" && action.submit === true) ||
+        (action.kind === "key" && entersForm(action.name))) &&
       element?.formId
         ? observation.elements.find(
             (item) =>
@@ -1549,7 +1558,9 @@ export class OrchestratorSession {
     const matched = submitButton
       ? irreversibleActionMatch(submitButton)
       : action.kind === "key"
-        ? undefined
+        ? element && activatesFocus(action.name)
+          ? irreversibleActionMatch(element)
+          : undefined
         : element && irreversibleActionMatch(element);
     if (matched && !this.constraints.allow_irreversible && !approved) {
       this.pendingGatedAction = {
@@ -2339,7 +2350,7 @@ export class OrchestratorSession {
           ]);
           if (!focused) return this.handoff("uncertain", { missing: "target cannot be focused" });
         }
-        if (action.kind === "key" && action.name === "Enter") {
+        if (action.kind === "key" && activatesFocus(action.name)) {
           const focusedRef =
             op.ref ??
             (await this.page
@@ -2348,7 +2359,12 @@ export class OrchestratorSession {
           const focused = sampled.observation.elements.find(
             (element) => element.ref === focusedRef,
           );
-          if (focused?.formId)
+          // Enter submits the focused field's form; Enter or Space on a focused control clicks it.
+          // Either is gated like the click or submit it stands for.
+          if (
+            focused &&
+            ((entersForm(action.name) && focused.formId) || irreversibleActionMatch(focused))
+          )
             action = {
               ...action,
               target: {

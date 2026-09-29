@@ -5004,3 +5004,171 @@ test("R1: a page that keeps navigating does not hold browser_run past its budget
     await instance.session.close();
   }
 });
+
+test("R3: Enter or Space on a focused irreversible control waits for approval", async () => {
+  const items = [
+    element("Buy now", "button", { ref: "e1", tag: "button", inputType: "button" }),
+    element("Delete account", "link", {
+      ref: "e2",
+      tag: "a",
+      href: "http://example.test/delete",
+    }),
+    element("Delete draft", "button", {
+      ref: "e3",
+      tag: "button",
+      inputType: "button",
+      formId: "form:draft",
+    }),
+    element("Title", "textbox", {
+      ref: "e4",
+      tag: "input",
+      inputType: "text",
+      formId: "form:draft",
+    }),
+    element("Save", "button", {
+      ref: "e5",
+      tag: "button",
+      inputType: "submit",
+      formId: "form:draft",
+    }),
+    element("Next", "button", { ref: "e6", tag: "button", inputType: "button" }),
+  ];
+  const make = (allow = false) =>
+    fixture({
+      observations: [observation(items)],
+      options: { constraints: { allow_irreversible: allow }, budget: { steps: 1 } },
+    });
+  for (const [ref, key] of [
+    ["e1", "Enter"],
+    ["e1", "Space"],
+    ["e1", " "],
+    ["e1", "Control+Enter"],
+    ["e2", "Enter"],
+    ["e3", "Space"],
+    ["e3", "Enter"],
+  ] as const) {
+    const gated = make();
+    const allowed = make(true);
+    try {
+      gated.page.results.push(true);
+      const blocked = await gated.session.act([{ action: "press_key", ref, key }]);
+      assert.equal(blocked.status, "CONFIRM_REQUIRED", `${ref} ${key}`);
+      assert.equal(gated.seen.actions.length, 0, `${ref} ${key}`);
+      const approved = await gated.session.resume({ allow_irreversible: true });
+      assert.equal(approved.status, "BUDGET_EXHAUSTED", `${ref} ${key}`);
+      assert.equal(gated.seen.actions.length, 1, `${ref} ${key}`);
+      const pressed = gated.seen.actions[0] as Extract<Action, { kind: "key" }>;
+      assert.equal(pressed.kind, "key");
+      assert.equal(pressed.name, key);
+      assert.equal(pressed.target?.ref, ref);
+      allowed.page.results.push(true);
+      assert.notEqual(
+        (await allowed.session.act([{ action: "press_key", ref, key }])).status,
+        "CONFIRM_REQUIRED",
+        `${ref} ${key}`,
+      );
+      assert.equal(allowed.seen.actions.length, 1, `${ref} ${key}`);
+    } finally {
+      await gated.session.close();
+      await allowed.session.close();
+    }
+  }
+  // A harmless button, a plain field, and keys that do not activate anything are not gated.
+  for (const [ref, key] of [
+    ["e6", "Enter"],
+    ["e6", "Space"],
+    ["e4", "Enter"],
+    ["e1", "Tab"],
+    ["e1", "Escape"],
+  ] as const) {
+    const instance = make();
+    try {
+      instance.page.results.push(true);
+      const result = await instance.session.act([{ action: "press_key", ref, key }]);
+      assert.notEqual(result.status, "CONFIRM_REQUIRED", `${ref} ${key}`);
+      assert.equal(instance.seen.actions.length, 1, `${ref} ${key}`);
+    } finally {
+      await instance.session.close();
+    }
+  }
+});
+
+test("R3: Enter after focusing a control without a ref waits for approval", async () => {
+  const buy = element("Buy now", "button", { ref: "e1", tag: "button", inputType: "button" });
+  const instance = fixture({
+    observations: [observation([buy])],
+    options: { budget: { steps: 1 } },
+  });
+  try {
+    instance.page.results.push("e1");
+    const blocked = await instance.session.act([{ action: "press_key", key: "Enter" }]);
+    assert.equal(blocked.status, "CONFIRM_REQUIRED");
+    assert.equal(instance.seen.actions.length, 0);
+  } finally {
+    await instance.session.close();
+  }
+});
+
+test("R3: typing with submit into a form with an irreversible submit button waits for approval", async () => {
+  const field = element("Quantity", "textbox", {
+    ref: "e1",
+    tag: "input",
+    inputType: "text",
+    formId: "form:order",
+  });
+  const buy = element("Place order", "button", {
+    ref: "e2",
+    tag: "button",
+    inputType: "submit",
+    formId: "form:order",
+  });
+  const search = element("Search", "textbox", { ref: "e3", tag: "input", inputType: "search" });
+  const make = (allow = false) =>
+    fixture({
+      observations: [observation([field, buy, search])],
+      options: {
+        constraints: { allow_irreversible: allow },
+        budget: { steps: 1 },
+        values: { quantity: "2" },
+      },
+    });
+  for (const op of [
+    { action: "type", ref: "e1", text: "2", submit: true },
+    { action: "type", ref: "e1", value_key: "quantity", submit: true },
+  ] as const) {
+    const gated = make();
+    const allowed = make(true);
+    try {
+      const blocked = await gated.session.act([op]);
+      assert.equal(blocked.status, "CONFIRM_REQUIRED", JSON.stringify(op));
+      assert.equal(gated.seen.actions.length, 0, JSON.stringify(op));
+      const approved = await gated.session.resume({ allow_irreversible: true });
+      assert.equal(approved.status, "BUDGET_EXHAUSTED", JSON.stringify(op));
+      const typed = gated.seen.actions[0] as Extract<Action, { kind: "type" }>;
+      assert.equal(typed.kind, "type");
+      assert.equal(typed.submit, true);
+      assert.notEqual((await allowed.session.act([op])).status, "CONFIRM_REQUIRED");
+      assert.equal(allowed.seen.actions.length, 1);
+    } finally {
+      await gated.session.close();
+      await allowed.session.close();
+    }
+  }
+  const outside = make();
+  try {
+    const result = await outside.session.act([
+      { action: "type", ref: "e3", text: "shoes", submit: true },
+    ]);
+    assert.notEqual(result.status, "CONFIRM_REQUIRED");
+    assert.equal(outside.seen.actions.length, 1);
+    const notSubmitting = make();
+    try {
+      await notSubmitting.session.act([{ action: "type", ref: "e1", text: "2" }]);
+      assert.equal(notSubmitting.seen.actions.length, 1);
+    } finally {
+      await notSubmitting.session.close();
+    }
+  } finally {
+    await outside.session.close();
+  }
+});

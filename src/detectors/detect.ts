@@ -266,8 +266,10 @@ export function irreversibleActionMatch(
   const submitInput = item.tag === "input" && ["submit", "image"].includes(item.inputType ?? "");
   const control =
     item.role === "button" || item.role === "menuitem" || item.tag === "button" || submitInput;
-  if (!control && item.role !== "link") return undefined;
-  if (item.role === "link" && !control) {
+  // A div the observer found clickable acts as a link or button, so it is gated the same way as a link.
+  const linkLike = item.role === "link" || item.role === "clickable";
+  if (!control && !linkLike) return undefined;
+  if (linkLike && !control) {
     const words = item.name.trim().split(/\s+/u);
     const cjk = [...item.name.matchAll(/[\p{Script=Han}]/gu)].length;
     if (cjk > 12 || words.length > 5) return undefined;

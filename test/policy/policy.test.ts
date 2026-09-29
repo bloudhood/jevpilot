@@ -501,38 +501,39 @@ test("stable request shape and page field isolation", () => {
     'url: https://example.test/form\ntitle: Example\ne1  button  "Continue"\ne2  textbox  "Name"  required  =""\ne3  textbox  "Password"\ne4  select  "Country"  =  {Taiwan|Japan}\ne5  checkbox  "Agree"\npage: Please complete the form',
   );
 
-  test("calibrated policy threshold defaults use exact inclusive boundaries", async () => {
-    assert.deepEqual(POLICY_DEFAULT_THRESHOLDS, {
-      op: 0.6,
-      target: 0.6,
-      value_for: 0.6,
-      option_for: 0.7,
-      situation: 0.6,
-      goal_met: 0.6,
-      goal_met_unchanged: 0.8,
-      check: 0.7,
-      check_margin: 0.15,
-    });
-    const source = input();
-    const request = buildDecisionState(source);
-    assert.deepEqual(
-      interpret(request.questions, await decide(request, { op: "DONE" }, 0.6), source),
-      { type: "done_candidate", goalMet: 0.6 },
-    );
-    const boundarySource = input();
-    boundarySource.observation.elements = [
-      element("e2", "textbox", "Name", { inputType: "text", required: true, value: "" }),
-    ];
-    const boundaryRequest = buildDecisionState(boundarySource);
-    const mapping = await decide(boundaryRequest, { op: "TYPE", value_for_e2: "person_name" });
-    if (mapping.value_for_e2?.type !== "choice") throw new Error("missing field mapping");
-    mapping.value_for_e2.confidence = 0.6;
-    assert.equal(interpret(boundaryRequest.questions, mapping, boundarySource).type, "batch");
-  });
   assert.deepEqual(result.reductions, []);
   assert.deepEqual(result.state.recent_trace, [
     { op: "CLICK", page_target_name: "Previous button", outcome: "changed" },
   ]);
+});
+
+test("calibrated policy threshold defaults use exact inclusive boundaries", async () => {
+  assert.deepEqual(POLICY_DEFAULT_THRESHOLDS, {
+    op: 0.6,
+    target: 0.6,
+    value_for: 0.6,
+    option_for: 0.7,
+    situation: 0.6,
+    goal_met: 0.6,
+    goal_met_unchanged: 0.8,
+    check: 0.7,
+    check_margin: 0.15,
+  });
+  const source = input();
+  const request = buildDecisionState(source);
+  assert.deepEqual(
+    interpret(request.questions, await decide(request, { op: "DONE" }, 0.6), source),
+    { type: "done_candidate", goalMet: 0.6 },
+  );
+  const boundarySource = input();
+  boundarySource.observation.elements = [
+    element("e2", "textbox", "Name", { inputType: "text", required: true, value: "" }),
+  ];
+  const boundaryRequest = buildDecisionState(boundarySource);
+  const mapping = await decide(boundaryRequest, { op: "TYPE", value_for_e2: "person_name" });
+  if (mapping.value_for_e2?.type !== "choice") throw new Error("missing field mapping");
+  mapping.value_for_e2.confidence = 0.6;
+  assert.equal(interpret(boundaryRequest.questions, mapping, boundarySource).type, "batch");
 });
 
 test("eligibility, viewport, bounds and question identifiers", () => {
@@ -988,6 +989,27 @@ test("irreversible matcher gates injection bait by code", async () => {
       kind: "click",
       target: { epoch: 7, ref: "e1", fingerprint: "fp-e1" },
     });
+  assert.equal(
+    interpret(request.questions, answers, { ...source, allowIrreversible: true }).type,
+    "act",
+  );
+});
+
+test("R3: clicking a clickable div named like a purchase waits for confirmation", async () => {
+  const observation = fixture();
+  observation.elements[0] = element("e1", "clickable", "Buy now", { tag: "div" });
+  const source = input(observation);
+  const request = buildDecisionState(source);
+  const answers = await decide(request, { op: "CLICK", click_target: "e1" });
+  const gated = interpret(request.questions, answers, source);
+  assert.equal(gated.type, "handoff");
+  if (gated.type === "handoff") {
+    assert.equal(gated.reason, "confirm_required");
+    assert.deepEqual(gated.pendingAction, {
+      kind: "click",
+      target: { epoch: 7, ref: "e1", fingerprint: "fp-e1" },
+    });
+  }
   assert.equal(
     interpret(request.questions, answers, { ...source, allowIrreversible: true }).type,
     "act",
