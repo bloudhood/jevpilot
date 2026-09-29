@@ -1,0 +1,49 @@
+{
+  "name": "jevpilot",
+  "version": "0.1.0",
+  "description": "Fast Jev browser MCP server: Jev (TypeSafe System One) drives a real Chrome step by step for AI agents and hands back early when unsure.",
+  "keywords": [
+    "jev",
+    "jev-browser",
+    "browser",
+    "mcp",
+    "mcp-server",
+    "browser-automation",
+    "typesafe",
+    "system-one",
+    "ai-agent",
+    "chrome",
+    "cdp"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "jevpilot-mcp": "./dist/mcp/main.js"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "prepack": "npm run build",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/**/*.test.ts\"",
+    "test:unit": "node --test \"test/decision/*.test.ts\" \"test/browser/*.test.ts\" \"test/observer/*.test.ts\" \"test/engine/*.test.ts\" \"test/executor/*.test.ts\" \"test/detectors/*.test.ts\" \"test/policy/*.test.ts\" \"test/orchestrator/*.test.ts\" \"test/mcp/*.test.ts\" \"test/util/*.test.ts\"",
+    "test:integration": "node --test --test-concurrency=1 \"test/browser/integration/*.test.ts\" \"test/observer/integration/*.test.ts\" \"test/executor/integration/*.test.ts\" \"test/detectors/integration/*.test.ts\" \"test/orchestrator/integration/*.test.ts\" \"test/mcp/integration/*.test.ts\"",
+    "format": "prettier --write src test",
+    "format:check": "prettier --check src test"
+  },
+  "files": ["dist"],
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.1",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.18.1",
+    "devtools-protocol": "^0.0.1704034",
+    "prettier": "^3.6.0",
+    "typescript": "^5.8.0",
+    "ws": "^8.21.3"
+  }
+}

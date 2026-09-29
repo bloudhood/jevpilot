@@ -1,0 +1,11 @@
+node_modules/
+.npm-cache/
+dist/
+coverage/
+.env
+.env.*
+*.log
+.claude/worktrees/
+profiles/
+downloads/
+traces/

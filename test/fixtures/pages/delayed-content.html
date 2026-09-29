@@ -1,0 +1,17 @@
+<!doctype html>
+<title>Delayed content</title>
+<main id="content"></main>
+<script>
+  let loadingTicks = 0;
+  const loading = setInterval(() => {
+    const marker = document.createElement("span");
+    marker.hidden = true;
+    marker.textContent = String(++loadingTicks);
+    document.querySelector("#content").append(marker);
+  }, 40);
+  setTimeout(() => {
+    clearInterval(loading);
+    document.querySelector("#content").innerHTML =
+      "<h1>Rendered article</h1><p>Complete after delay</p>";
+  }, 700);
+</script>

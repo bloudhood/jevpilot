@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>Long fixture</title>
+  </head>
+  <body>
+    <header>
+      <nav>
+        <input type="search" aria-label="站内搜索" /><a href="/next">下一页</a
+        ><a href="/previous">Next</a>
+      </nav>
+    </header>
+    <main id="links"></main>
+    <nav class="pagination" aria-label="Pagination" style="margin-top: 2000px">
+      <a href="/page/2" rel="next">More</a>
+      <a href="?page=3" aria-label="下一页">下一页</a>
+      <a
+        href="/archive"
+        rel="next"
+        aria-label="Show older posts"
+        style="display: inline-block; width: 24px; height: 24px"
+      ></a>
+    </nav>
+    <script>
+      const fragment = document.createDocumentFragment();
+      for (let i = 0; i < 2000; i++) {
+        const link = document.createElement("a");
+        link.href = `/item/${i}`;
+        link.textContent = i === 1800 ? "量子计算专题报告" : `普通链接 ${i}`;
+        link.style.display = "block";
+        fragment.append(link);
+      }
+      document.getElementById("links").append(fragment);
+    </script>
+  </body>
+</html>

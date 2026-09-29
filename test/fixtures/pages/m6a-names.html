@@ -1,0 +1,55 @@
+<!doctype html>
+<meta charset="utf-8" />
+<style>
+  .next::before {
+    content: "Next page";
+  }
+</style>
+<x-btn id="slotted">Buy now</x-btn>
+<button id="nested"><x-label></x-label></button>
+<input id="submit" type="submit" value="确认支付" />
+<input
+  id="image"
+  type="image"
+  alt="Search image"
+  src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs="
+/>
+<span id="reference" aria-label="Close dialog"></span
+><button id="labelled" aria-labelledby="reference">x</button>
+<button id="pseudo" class="next"></button>
+<a id="svg" href="#settings"
+  ><svg width="24" height="24"><title>Settings</title></svg></a
+>
+<input id="placeholder" placeholder="Search books" />
+<label>Email <input id="email" /></label>
+<label
+  >Choice
+  <select id="choice">
+    <option>First</option>
+    <option>Second</option>
+  </select></label
+>
+<a id="logo" href="#home"
+  ><span style="display: none">Main menu hidden inside logo</span><img alt="Wikipedia"
+/></a>
+<script>
+  customElements.define(
+    "x-btn",
+    class extends HTMLElement {
+      constructor() {
+        super();
+        this.attachShadow({ mode: "open" }).innerHTML =
+          "<button id=shadow-button><slot></slot></button>";
+      }
+    },
+  );
+  customElements.define(
+    "x-label",
+    class extends HTMLElement {
+      constructor() {
+        super();
+        this.attachShadow({ mode: "open" }).innerHTML = "Checkout";
+      }
+    },
+  );
+</script>

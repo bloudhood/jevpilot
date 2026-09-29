@@ -1,0 +1,12 @@
+node_modules
+.npm-cache
+dist
+.git
+.claude
+.env
+.env.*
+coverage
+*.log
+profiles
+downloads
+traces

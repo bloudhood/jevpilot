@@ -1,0 +1,8 @@
+<!doctype html>
+<title>Shadow content</title>
+<main id="host"></main>
+<script>
+  const root = document.querySelector("#host").attachShadow({ mode: "open" });
+  root.innerHTML =
+    "<article><h1>Shadow headline</h1><p>Archive collection details</p><button>Open item</button></article>";
+</script>

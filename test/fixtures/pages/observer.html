@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>Observer fixture</title>
+  </head>
+  <body>
+    <main>
+      <h1>页面标题</h1>
+      <form id="primary">
+        <label for="name">姓名</label><input id="name" required />
+        <label>包裹标签<input id="wrapped" /></label>
+        <span id="external-label">引用标签</span
+        ><input id="labelled" aria-labelledby="external-label" />
+        <input id="placeholder" placeholder="仅占位符" />
+        <input id="filled-placeholder" placeholder="今日热搜" value="查询词" />
+        <input id="title-only" title="仅标题" />
+        <select id="size" aria-label="尺寸" required></select>
+        <label><input type="checkbox" name="agree" />同意</label>
+        <label><input type="radio" name="choice" />选项甲</label>
+        <input type="password" id="password" value="do-not-leak" aria-label="密码" />
+        <input autocomplete="cc-number" value="4111111111111111" aria-label="卡号" />
+        <input
+          autocomplete="current-password"
+          value="current-secret"
+          aria-label="当前密码"
+          required
+        />
+        <input autocomplete="new-password" value="new-secret" aria-label="新密码" />
+        <input autocomplete="one-time-code" value="123456" aria-label="验证码" />
+        <input
+          type="text"
+          name="password_confirmation"
+          value="toggled-secret"
+          aria-label="显示密码"
+        />
+        <input autocomplete="cc-csc" value="999" aria-label="安全码" />
+        <input type="password" id="empty-password" aria-label="空密码" required />
+      </form>
+      <div contenteditable aria-label="编辑区域">初始文本</div>
+      <div role="button" aria-label="ARIA 按钮">按钮</div>
+      <div role="combobox" aria-label="ARIA 组合框" tabindex="0" style="min-height: 24px">
+        请选择
+      </div>
+      <a href="/logo"><img alt="站点标志" width="24" height="24" /></a>
+      <div style="display: none">
+        Main menu Main menu move to sidebar hide Navigation Main page Contents Current events
+      </div>
+      <a id="wiki-logo" href="/wiki/Main_Page"
+        ><span style="display: none">Main menu hidden inside logo</span
+        ><img alt="Wikipedia" width="24" height="24"
+      /></a>
+      <a href="/vote" style="display: inline-block"
+        ><div class="votearrow" title="upvote" style="width: 12px; height: 12px"></div
+      ></a>
+      <a href="/svg"
+        ><svg width="24" height="24"><title>矢量标题</title></svg></a
+      >
+      <button>
+        <span aria-label="子级标签" style="display: inline-block; width: 12px; height: 12px"></span>
+      </button>
+      <a
+        href="/title"
+        title="链接标题"
+        style="display: inline-block; width: 24px; height: 24px"
+      ></a>
+      <a href="/card"><span>稍后再看</span><span>14.2万</span><span>275</span></a>
+      <div id="shadow-host"></div>
+      <iframe id="same-frame" src="/frame"></iframe>
+      <iframe id="cross-frame" src="{{CROSS_URL}}"></iframe>
+      <div style="display: none"><button>Display hidden</button></div>
+      <button style="visibility: hidden">Visibility hidden</button>
+      <button style="opacity: 0">Opacity hidden</button>
+      <button style="width: 0; height: 0; padding: 0; border: 0">Zero size</button>
+      <div aria-hidden="true"><button>ARIA hidden</button></div>
+      <div inert><button>Inert hidden</button></div>
+      <div
+        id="overlay"
+        style="display: none; position: fixed; inset: 0; z-index: 100; background: #fff"
+      >
+        Overlay
+      </div>
+      <dialog id="dialog">Dialog</dialog>
+      <button id="replace">Replace me</button>
+      <div id="pseudo" style="cursor: pointer" onclick="void 0">伪按钮</div>
+      <p>中文内容保持完整。</p>
+    </main>
+    <script>
+      const select = document.getElementById("size");
+      for (let i = 0; i < 30; i++)
+        select.add(new Option(i === 1 ? "Medium" : `Option ${i}`, String(i)));
+      select.value = "1";
+      const host = document.getElementById("shadow-host").attachShadow({ mode: "open" });
+      host.innerHTML =
+        '<form id="shadow-form"><label>影子字段<input id="shadow-input" required></label><div id="nested"></div></form>';
+      host.getElementById("nested").attachShadow({ mode: "open" }).innerHTML =
+        '<input aria-label="嵌套字段">';
+    </script>
+  </body>
+</html>

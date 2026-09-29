@@ -1,0 +1,20 @@
+<!doctype html>
+<html>
+  <body>
+    <div class="search-btn" style="cursor: pointer; width: 41px; height: 41px">
+      <i class="jm-i jm-i-search"></i>
+    </div>
+    <input id="search" style="visibility: hidden" aria-label="Search field" />
+    <button id="svg-button">
+      <svg><use href="#menu-icon"></use></svg>
+    </button>
+    <div id="unknown" style="cursor: pointer; width: 41px; height: 41px">
+      <i class="jm-i jm-i-mystery"></i>
+    </div>
+    <script>
+      document.querySelector(".search-btn").addEventListener("click", () => {
+        document.querySelector("#search").style.visibility = "visible";
+      });
+    </script>
+  </body>
+</html>

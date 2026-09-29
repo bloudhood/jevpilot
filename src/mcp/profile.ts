@@ -1,0 +1,112 @@
+import { readFile } from "node:fs/promises";
+import { createOwnedTempDir, removeTempDir } from "../util/owned-temp.ts";
+import {
+  BrowserConfigError,
+  buildLaunchArgs,
+  parseCdpProfile,
+  type BrowserProfile,
+} from "../engine/default.ts";
+import { McpUserError } from "./errors.ts";
+
+export function parseNavigationTimeout(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  if (!/^[1-9][0-9]*$/u.test(value) || Number(value) > 2_147_483_647)
+    throw new McpUserError("JEVPILOT_NAVIGATION_TIMEOUT_MS must be between 1 and 2147483647.");
+  return Number(value);
+}
+
+export function parseActionabilityTimeout(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  if (!/^[1-9][0-9]*$/u.test(value) || Number(value) > 2_147_483_647)
+    throw new McpUserError("JEVPILOT_ACTIONABILITY_TIMEOUT_MS must be between 1 and 2147483647.");
+  return Number(value);
+}
+
+function parseExtraArgs(value: string | undefined): string[] | undefined {
+  if (value === undefined || value.trim() === "") return undefined;
+  return value.trim().split(/\s+/u);
+}
+
+export async function loadMcpProfile(
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+): Promise<{
+  profile: BrowserProfile;
+  cleanup: () => Promise<void>;
+}> {
+  if (env.JEVPILOT_PROFILE_FILE) {
+    let contents: string;
+    try {
+      contents = await readFile(env.JEVPILOT_PROFILE_FILE, "utf8");
+    } catch {
+      throw new McpUserError("Cannot read JEVPILOT_PROFILE_FILE.");
+    }
+    let input: unknown;
+    try {
+      input = JSON.parse(contents);
+    } catch {
+      throw new McpUserError("JEVPILOT_PROFILE_FILE must contain valid JSON.");
+    }
+    if (
+      env.JEVPILOT_BROWSER_PATH &&
+      input &&
+      typeof input === "object" &&
+      "kind" in input &&
+      input.kind === "desktop-chrome"
+    )
+      input = { ...input, executable: env.JEVPILOT_BROWSER_PATH };
+    try {
+      return { profile: parseCdpProfile(input), cleanup: async () => {} };
+    } catch (error) {
+      if (error instanceof BrowserConfigError) {
+        const fields = [...new Set(error.problems.map((problem) => problem.split(":", 1)[0]))];
+        throw new McpUserError(`JEVPILOT_PROFILE_FILE has invalid fields: ${fields.join(", ")}.`);
+      }
+      throw new McpUserError("JEVPILOT_PROFILE_FILE has an invalid browser profile.");
+    }
+  }
+
+  const isLinux = platform === "linux";
+  if (env.JEVPILOT_DISPLAY && !["xvfb", "headless", "headed"].includes(env.JEVPILOT_DISPLAY))
+    throw new McpUserError("JEVPILOT_DISPLAY must be headless, headed, or xvfb on Linux.");
+  if (!isLinux && env.JEVPILOT_DISPLAY === "xvfb")
+    throw new McpUserError("JEVPILOT_DISPLAY=xvfb is only available on Linux.");
+  const extraArgs = parseExtraArgs(env.JEVPILOT_EXTRA_ARGS);
+  const settings = {
+    kind: isLinux ? "server-plain" : "desktop-chrome",
+    windowSize: { width: 1280, height: 900 },
+    ...(isLinux
+      ? {
+          display:
+            env.JEVPILOT_DISPLAY === "headed" ? "xvfb" : (env.JEVPILOT_DISPLAY ?? "headless"),
+        }
+      : { display: env.JEVPILOT_DISPLAY === "headed" ? "headed" : "headless" }),
+    ...(extraArgs ? { extraArgs } : {}),
+    ...(env.JEVPILOT_BROWSER_PATH ? { executable: env.JEVPILOT_BROWSER_PATH } : {}),
+  };
+  if (extraArgs) {
+    // Fail at startup, not on the first browser_run.
+    const check = parseCdpProfile({ ...settings, userDataDir: "check" });
+    try {
+      if (check.kind !== "attach") buildLaunchArgs(check);
+    } catch (error) {
+      if (!(error instanceof BrowserConfigError)) throw error;
+      throw new McpUserError(
+        "JEVPILOT_EXTRA_ARGS contains a flag jevpilot does not allow (--headless, --disable-gpu, --enable-automation).",
+      );
+    }
+  }
+  const ownedDirectory = env.JEVPILOT_USER_DATA_DIR
+    ? undefined
+    : await createOwnedTempDir("jevpilot-mcp-browser-");
+  const profile = parseCdpProfile({
+    ...settings,
+    userDataDir: env.JEVPILOT_USER_DATA_DIR ?? ownedDirectory,
+  });
+  return {
+    profile,
+    cleanup: async () => {
+      if (ownedDirectory) await removeTempDir(ownedDirectory);
+    },
+  };
+}
