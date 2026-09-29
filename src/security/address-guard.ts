@@ -138,3 +138,42 @@ export async function blockedUrl(
     if (timer) clearTimeout(timer);
   }
 }
+
+const resolverRule = /^MAP\s+(\S+)\s+(\S+)$/u;
+
+/**
+ * Build an AddressLookup that mirrors Chrome's --host-resolver-rules MAP entries so the
+ * guard resolves hosts exactly like the browser it protects (Chrome applies these rules
+ * after DNS; a deployment using them desyncs guard and browser if the guard ignores them).
+ * Mapped hostnames resolve to their mapped address without touching DNS. Unmapped
+ * hostnames fall through to the underlying lookup.
+ */
+export function lookupWithResolverRules(
+  extraArgs: readonly string[] | undefined,
+  fallback: AddressLookup = dnsLookup,
+): AddressLookup {
+  const maps = new Map<string, string>();
+  for (const argument of extraArgs ?? []) {
+    if (!argument.startsWith("--host-resolver-rules")) continue;
+    const value = argument.slice(argument.indexOf("=") + 1);
+    for (const rule of value.split(",")) {
+      const match = resolverRule.exec(rule.trim());
+      if (match) maps.set(match[1]!.toLowerCase(), match[2]!);
+    }
+  }
+  if (maps.size === 0) return fallback;
+  return async (hostname, options) => {
+    const mapped = maps.get(hostname.toLowerCase());
+    if (mapped === undefined) return fallback(hostname, options);
+    // Chrome's mapping syntax is HOST[:PORT]; the port never affects the resolved address.
+    const address = mapped.replace(/:\d+$/u, "");
+    if (isIP(address)) return [{ address, family: isIP(address) }];
+    // A mapping to another hostname chains one level (Chrome resolves the replacement).
+    const chained = maps.get(address.toLowerCase());
+    if (chained !== undefined && isIP(chained.replace(/:\d+$/u, "")))
+      return [
+        { address: chained.replace(/:\d+$/u, ""), family: isIP(chained.replace(/:\d+$/u, "")) },
+      ];
+    return fallback(address, options);
+  };
+}

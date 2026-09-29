@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseMaxSessions, parseNetworkGuard } from "../../src/mcp/network-guard.ts";
-import { blockedAddress, blockedUrl } from "../../src/security/address-guard.ts";
+import {
+  blockedAddress,
+  blockedUrl,
+  lookupWithResolverRules,
+} from "../../src/security/address-guard.ts";
 
 test("O3: the metadata guard blocks cloud metadata addresses in every notation", async () => {
   const guard = parseNetworkGuard();
@@ -61,6 +65,32 @@ test("O3: a failing or slow DNS lookup blocks the request instead of passing the
   const started = Date.now();
   assert.equal(await blockedUrl("http://slow.example/", guard, slow), "slow.example");
   assert.ok(Date.now() - started < 2900, "the 2s DNS timeout still applies");
+});
+
+test("O3: the guard mirrors Chrome host-resolver-rules MAP entries", async () => {
+  const guard = parseNetworkGuard();
+  const neverDns = async () => {
+    throw new Error("mapped hosts must not reach DNS");
+  };
+  const lookup = lookupWithResolverRules(
+    ["--host-resolver-rules=MAP outside.test 127.0.0.1,MAP unreachable.invalid 127.0.0.1:9"],
+    neverDns,
+  );
+  // Mapped to loopback: allowed by the metadata guard, exactly like the browser resolves it.
+  assert.equal(await blockedUrl("http://outside.test:9443/result", guard, lookup), undefined);
+  assert.equal(await blockedUrl("http://unreachable.invalid/", guard, lookup), undefined);
+  // A mapping that points at a blocked address is still caught.
+  const mapping = lookupWithResolverRules(
+    ["--host-resolver-rules=MAP pin.test 169.254.1.1"],
+    neverDns,
+  );
+  assert.equal(await blockedUrl("http://pin.test/", guard, mapping), "169.254.1.1");
+  // Extra args without resolver rules, or unknown rule shapes, fall through to the base
+  // lookup — here a failing one, so the fail-closed path reports the host as blocked.
+  const plain = lookupWithResolverRules(["--no-proxy-server"], neverDns);
+  assert.equal(await blockedUrl("http://host.test/", guard, plain), "host.test");
+  const tolerant = lookupWithResolverRules(["--host-resolver-rules=EXCLUDE bad"], neverDns);
+  assert.equal(await blockedUrl("http://host.test/", guard, tolerant), "host.test");
 });
 
 test("O3: JEVPILOT_BLOCKED_ADDRESSES rejects CIDRs with host bits set", () => {
