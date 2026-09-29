@@ -507,6 +507,12 @@ class CdpPageHandle implements PageHandle {
   }
 
   private detachFrame(sessionId: string): void {
+    // Chrome dismisses a dialog whose frame goes away, and no answer can reach a session that is gone,
+    // so a dialog kept for it would block every later call on this page.
+    if (this.pendingDialogSessionId === sessionId) {
+      this.pendingDialog = undefined;
+      this.pendingDialogSessionId = undefined;
+    }
     for (const [frameId, child] of this.children) {
       if (child.sessionId === sessionId || child.parentSessionId === sessionId) {
         this.children.delete(frameId);

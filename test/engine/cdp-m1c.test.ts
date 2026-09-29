@@ -699,6 +699,79 @@ test("OOPIF calls and events stay on the child flattened session", async () => {
   }
 });
 
+test("R6: a dialog of a frame that goes away no longer blocks the page", async () => {
+  const attach = async (host: Awaited<ReturnType<typeof fixture>>) => {
+    host.event(
+      "Target.attachedToTarget",
+      { sessionId: "child", targetInfo: { type: "iframe", targetId: "child-frame" } },
+      "s1",
+    );
+    host.event(
+      "Target.attachedToTarget",
+      { sessionId: "nested", targetInfo: { type: "iframe", targetId: "nested-frame" } },
+      "child",
+    );
+    await waitUntil(() =>
+      host.sent.some(
+        (message) => message.method === "Page.enable" && message.sessionId === "nested",
+      ),
+    );
+  };
+  const blockedBy = async (host: Awaited<ReturnType<typeof fixture>>, session: string) => {
+    const dialogs: string[] = [];
+    host.page.on("dialog", (dialog) => dialogs.push(dialog.message));
+    host.event("Page.javascriptDialogOpening", { type: "confirm", message: session }, session);
+    await waitUntil(() => dialogs.length === 1);
+    await assert.rejects(
+      host.page.callIsolated(() => true, []),
+      (error: unknown) => error instanceof DialogBlockingError,
+    );
+  };
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
+  // The frame that opened the dialog goes away.
+  for (const [dialogSession, detached, detachedFrom] of [
+    ["child", "child", "s1"],
+    ["nested", "nested", "child"],
+    ["nested", "child", "s1"],
+  ] as const) {
+    const host = await fixture();
+    try {
+      await attach(host);
+      await blockedBy(host, dialogSession);
+      host.event("Target.detachedFromTarget", { sessionId: detached }, detachedFrom);
+      await settle();
+      assert.equal(
+        await host.page.callIsolated(() => true, []),
+        true,
+        `${dialogSession} dialog, ${detached} detached`,
+      );
+    } finally {
+      await host.close();
+    }
+  }
+  // Another frame going away leaves the dialog in place.
+  const host = await fixture();
+  try {
+    await attach(host);
+    await blockedBy(host, "nested");
+    host.event("Target.detachedFromTarget", { sessionId: "unrelated" }, "s1");
+    await settle();
+    await assert.rejects(
+      host.page.callIsolated(() => true, []),
+      (error: unknown) => error instanceof DialogBlockingError,
+    );
+    await blockedBy(host, "s1");
+    host.event("Target.detachedFromTarget", { sessionId: "child" }, "s1");
+    await settle();
+    await assert.rejects(
+      host.page.callIsolated(() => true, []),
+      (error: unknown) => error instanceof DialogBlockingError,
+    );
+  } finally {
+    await host.close();
+  }
+});
+
 test("M6s-2: frames() does not wait for a child session that does not answer", async () => {
   let treeCalls = 0;
   const host = await fixture({
