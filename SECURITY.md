@@ -10,7 +10,7 @@ Use GitHub's private vulnerability reporting for this repository from its Securi
 
 ## Security model
 
-- The network guard defaults to metadata mode. It blocks cloud metadata addresses for document navigations, frames, redirects, popups and downloads. Private mode also blocks loopback and private ranges; off disables built-in ranges. Subresource requests are not checked. With a browser proxy, the connected-IP check is not available.
+- The network guard defaults to metadata mode. It blocks cloud metadata addresses for document navigations, frames, redirects, popups and downloads. Private mode also blocks loopback and private ranges; off disables built-in ranges. Subresource requests are not checked. A host that cannot be resolved for the check (a lookup timeout or resolver failure, not a missing name) is not loaded when the browser resolves names itself. With a browser proxy, the proxy resolves names, so neither the connected-IP check nor the local lookup can be relied on.
 - Streamable HTTP binds to 127.0.0.1 by default and always requires a bearer token of at least 16 characters. Origin and Host checks protect requests; there is no built-in TLS. Put non-loopback deployments behind a TLS reverse proxy.
 - Secret references may read only environment variables whose names begin with JEVPILOT_SECRET_ or files beneath JEVPILOT_SECRETS_DIR. File paths are resolved and checked against that root. Password values and resolved secret literals are redacted from observations and results.
 - File uploads are limited to files beneath JEVPILOT_UPLOAD_DIR.

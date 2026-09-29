@@ -29,7 +29,7 @@ Continues an existing session after a handoff.
 | session            | non-empty string                 | Yes      | Session ID returned by browser_run.                                                                  |
 | values             | record of strings or secret refs | No       | Add or replace supplied values.                                                                      |
 | goal_update        | non-empty string                 | No       | Update the goal.                                                                                     |
-| allow_irreversible | boolean                          | No       | Approve the pending irreversible action. Approval is scoped to that action.                          |
+| allow_irreversible | boolean                          | No       | Approve the pending irreversible action. Approval is scoped to that action and its page.             |
 | allowed_domains    | array of non-empty strings       | No       | Add domains to the session allowlist within any server allowlist; it cannot narrow the session list. |
 | dialog             | object                           | No       | Required accept boolean and optional value_key for a prompt response.                                |
 
