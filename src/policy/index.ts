@@ -137,8 +137,12 @@ const ranked = (items: ObservedElement[]): ObservedElement[] =>
       a.rect.y - b.rect.y ||
       a.ref.localeCompare(b.ref),
   );
+// A form id is chosen by the page (the form's id attribute): plain identifiers are shown as they are and
+// anything else, such as text with quotes or line breaks, is quoted and cut short.
+const formLabel = (formId: string): string =>
+  /^[\w:.@/-]{1,80}$/u.test(formId) ? formId : JSON.stringify(formId.slice(0, 80));
 const targetCriteria = (item: ObservedElement, repeated: boolean): string =>
-  `${item.role} ${JSON.stringify(item.name)}${!item.name && item.iconHint ? ` · icon ${item.iconHint}` : ""}${(repeated || item.itemPosition) && item.containerText ? ` · in ${JSON.stringify(item.containerText)}` : ""}${item.itemPosition ? ` · item ${item.itemPosition} of ${item.itemCount}` : ""}${item.landmark ? ` · ${item.landmark}` : ""}${item.formId ? ` · form ${item.formId}` : ""}`;
+  `${item.role} ${JSON.stringify(item.name)}${!item.name && item.iconHint ? ` · icon ${item.iconHint}` : ""}${(repeated || item.itemPosition) && item.containerText ? ` · in ${JSON.stringify(item.containerText)}` : ""}${item.itemPosition ? ` · item ${item.itemPosition} of ${item.itemCount}` : ""}${item.landmark ? ` · ${item.landmark}` : ""}${item.formId ? ` · form ${formLabel(item.formId)}` : ""}`;
 const optionCriteria = (items: ObservedElement[]): Record<string, string> => {
   const counts = new Map<string, number>();
   for (const item of items) counts.set(item.name, (counts.get(item.name) ?? 0) + 1);
@@ -188,7 +192,7 @@ const submittableField = (
     eligibleKeys(item, valueKeys).length > 0
   );
 const fieldDescription = (item: ObservedElement): string =>
-  `${item.role} ${JSON.stringify(item.name)} (ref ${item.ref}${item.formId ? `, form ${item.formId}` : ""})`;
+  `${item.role} ${JSON.stringify(item.name)} (ref ${item.ref}${item.formId ? `, form ${formLabel(item.formId)}` : ""})`;
 
 function valueCandidates(
   answers: TaggedAnswers,
