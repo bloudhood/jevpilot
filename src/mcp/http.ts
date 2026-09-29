@@ -12,6 +12,8 @@ export type HttpConfig = {
   allowedOrigins: string[];
 };
 
+const loopback = (host: string) => host === "localhost" || host === "::1" || /^127\./u.test(host);
+
 export function parseHttpConfig(env: NodeJS.ProcessEnv): {
   transport: "stdio" | "http";
   http?: HttpConfig;
@@ -32,13 +34,20 @@ export function parseHttpConfig(env: NodeJS.ProcessEnv): {
       .split(",")
       .map((item) => item.trim())
       .filter(Boolean);
+  const allowedHosts = list(env.JEVPILOT_HTTP_ALLOWED_HOSTS);
+  // Non-loopback binds face the network: without a Host allowlist the DNS-rebinding
+  // check would rest on the token alone, so require one (this includes 0.0.0.0/::).
+  if (!loopback(host) && allowedHosts.length === 0)
+    throw new McpUserError(
+      "JEVPILOT_HTTP_ALLOWED_HOSTS is required when JEVPILOT_HTTP_HOST is not a loopback address.",
+    );
   return {
     transport,
     http: {
       host,
       port: Number(rawPort),
       token,
-      allowedHosts: list(env.JEVPILOT_HTTP_ALLOWED_HOSTS),
+      allowedHosts,
       allowedOrigins: list(env.JEVPILOT_HTTP_ALLOWED_ORIGINS),
     },
   };
@@ -46,24 +55,24 @@ export function parseHttpConfig(env: NodeJS.ProcessEnv): {
 
 const digest = (value: string) => createHash("sha256").update(value).digest();
 const equalToken = (a: string, b: string) => timingSafeEqual(digest(a), digest(b));
-const loopback = (host: string) => host === "localhost" || host === "::1" || /^127\./u.test(host);
 
 export function startHttpServer(
   config: HttpConfig,
   createMcpServer: () => McpServer,
-  options: { sessionIdleMs?: number } = {},
+  options: { sessionIdleMs?: number; maxSessions?: number } = {},
 ): Promise<{ server: Server; close: () => Promise<void>; port: number }> {
   const sessions = new Map<
     string,
     { transport: StreamableHTTPServerTransport; server: McpServer; touched: number }
   >();
   const sessionIdleMs = options.sessionIdleMs ?? 30 * 60 * 1000;
+  const maxSessions = options.maxSessions ?? 64;
   const idleTimer = setInterval(
     () => {
       const cutoff = Date.now() - sessionIdleMs;
       for (const [id, entry] of sessions)
         if (entry.touched < cutoff) {
-          void entry.transport.close();
+          void entry.transport.close().catch(() => {});
           sessions.delete(id);
         }
     },
@@ -154,6 +163,10 @@ export function startHttpServer(
       }
     }
     if (!entry) {
+      if (sessions.size >= maxSessions) {
+        reject(res, 503, "Too many MCP sessions; retry after older sessions idle out");
+        return;
+      }
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: randomUUID });
       const server = createMcpServer();
       entry = { transport, server, touched: Date.now() };
@@ -182,8 +195,13 @@ export function startHttpServer(
   });
   const close = async () => {
     clearInterval(idleTimer);
-    for (const entry of sessions.values()) await entry.transport.close().catch(() => {});
+    for (const entry of sessions.values()) {
+      await entry.transport.close().catch(() => {});
+      await entry.server.close().catch(() => {});
+    }
     sessions.clear();
+    // Active SSE streams would otherwise hold httpServer.close() open forever.
+    httpServer.closeAllConnections();
     await new Promise<void>((resolve) => httpServer.close(() => resolve()));
   };
   return new Promise((resolve, rejectPromise) => {
@@ -191,6 +209,10 @@ export function startHttpServer(
     httpServer.listen(config.port, config.host, () => {
       const address = httpServer.address();
       port = typeof address === "object" && address ? address.port : config.port;
+      // After listen, a server error must not escalate to an uncaught exception.
+      httpServer.on("error", (error: Error) => {
+        process.stderr.write(`jevpilot-mcp http server error: ${error.name}\n`);
+      });
       process.stderr.write(`jevpilot-mcp listening on http://${config.host}:${port}/mcp\n`);
       resolve({ server: httpServer, close, port });
     });

@@ -23,9 +23,12 @@ RUN npm run build
 FROM base AS runtime
 EXPOSE 8940
 COPY package*.json ./
-RUN npm ci --omit=dev --no-audit --no-fund
+RUN npm ci --omit=dev --no-audit --no-fund && chown -R jevpilot:jevpilot /app
 COPY --from=build /app/dist ./dist
-RUN chown -R jevpilot:jevpilot /app
+RUN chown -R jevpilot:jevpilot /app/dist
 USER jevpilot
 ENV JEVPILOT_DISPLAY=xvfb JEVPILOT_EXTRA_ARGS=--no-sandbox JEVPILOT_BROWSER_PATH=/usr/bin/chromium
+# Probe the HTTP endpoint when one is configured; a stdio-only container is checked by liveness instead.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD ["node", "-e", "const t = process.env.JEVPILOT_TRANSPORT; if (t !== 'http') process.exit(0); fetch(`http://127.0.0.1:${process.env.JEVPILOT_HTTP_PORT ?? 8940}/mcp`, { method: 'POST' }).then((r) => process.exit(r.status < 500 ? 0 : 1)).catch(() => process.exit(1))"]
 ENTRYPOINT ["tini", "--", "node", "dist/mcp/main.js"]

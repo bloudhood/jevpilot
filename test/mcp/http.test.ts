@@ -20,7 +20,7 @@ const initialize = (name: string) =>
 async function running(
   deps: McpDeps = fakeMcpDeps(),
   config: Partial<HttpConfig> = {},
-  options: { sessionIdleMs?: number } = {},
+  options: { sessionIdleMs?: number; maxSessions?: number } = {},
 ) {
   const app = createServer(deps);
   const http = await startHttpServer(
@@ -130,6 +130,27 @@ test("O4: http transport settings are validated at startup", () => {
       /JEVPILOT_HTTP_PORT/u,
       port,
     );
+  // A network-facing bind without a Host allowlist is rejected instead of skipping the check.
+  // Wildcard binds (0.0.0.0, ::) require one as well.
+  for (const host of ["0.0.0.0", "::", "192.168.1.10", "example.test"])
+    assert.throws(
+      () =>
+        parseHttpConfig({
+          JEVPILOT_TRANSPORT: "http",
+          JEVPILOT_HTTP_TOKEN: token,
+          JEVPILOT_HTTP_HOST: host,
+        }),
+      /JEVPILOT_HTTP_ALLOWED_HOSTS/u,
+      host,
+    );
+  // With an allowlist, network-facing binds are accepted.
+  const networkFacing = parseHttpConfig({
+    JEVPILOT_TRANSPORT: "http",
+    JEVPILOT_HTTP_TOKEN: token,
+    JEVPILOT_HTTP_HOST: "0.0.0.0",
+    JEVPILOT_HTTP_ALLOWED_HOSTS: "mcp.corp.test:8940",
+  });
+  assert.deepEqual(networkFacing.http?.allowedHosts, ["mcp.corp.test:8940"]);
   const parsed = parseHttpConfig({
     JEVPILOT_TRANSPORT: "http",
     JEVPILOT_HTTP_TOKEN: token,
@@ -327,5 +348,51 @@ test("O4: jevpilot-mcp serves HTTP from the environment without stdin", async ()
     await new Promise<void>((resolve) =>
       child.exitCode === null ? child.once("exit", () => resolve()) : resolve(),
     );
+  }
+});
+
+test("O4: creating more MCP sessions than the configured maximum is refused with 503", async () => {
+  const server = await running(fakeMcpDeps(), {}, { maxSessions: 2, sessionIdleMs: 60_000 });
+  const port = server.http.port;
+  try {
+    const first = await send(port, { body: initialize("one") });
+    const second = await send(port, { body: initialize("two") });
+    assert.ok(first.headers["mcp-session-id"] && second.headers["mcp-session-id"]);
+    const third = await send(port, { body: initialize("three") });
+    assert.equal(third.status, 503);
+    // Known sessions keep working and the counter frees after a DELETE.
+    const firstId = String(first.headers["mcp-session-id"]);
+    assert.equal(
+      (
+        await send(port, {
+          headers: { "mcp-session-id": firstId },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }),
+        })
+      ).status,
+      200,
+    );
+    assert.equal(
+      (await send(port, { method: "DELETE", headers: { "mcp-session-id": firstId } })).status,
+      200,
+    );
+    const fourth = await send(port, { body: initialize("four") });
+    assert.equal(fourth.status, 200, "the freed slot is reusable");
+  } finally {
+    await server.close();
+  }
+});
+
+test("O4: closing the HTTP server finishes even with a live session transport", async () => {
+  const server = await running(fakeMcpDeps(), {}, { sessionIdleMs: 60_000 });
+  try {
+    await send(server.http.port, { body: initialize("open-during-close") });
+    const started = Date.now();
+    await Promise.race([
+      server.close(),
+      new Promise((resolve) => setTimeout(() => resolve("timeout"), 5000)),
+    ]);
+    assert.ok(Date.now() - started < 5000, "close() must not hang on live connections");
+  } finally {
+    await server.close();
   }
 });

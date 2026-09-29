@@ -78,6 +78,27 @@ export function loadDecisionConfig(env: Record<string, string | undefined>): Dec
     ...(env.JEV_CONTEXT_LIMIT
       ? { contextLimit: integerSetting("JEV_CONTEXT_LIMIT", env.JEV_CONTEXT_LIMIT, 0, 1) }
       : {}),
+    // Optional circuit-breaker tuning (defaults live in decision/breaker.ts: 3 failures / 30s).
+    ...(env.JEV_BREAKER_THRESHOLD
+      ? {
+          breakerThreshold: integerSetting(
+            "JEV_BREAKER_THRESHOLD",
+            env.JEV_BREAKER_THRESHOLD,
+            1,
+            1,
+          ),
+        }
+      : {}),
+    ...(env.JEV_BREAKER_COOLDOWN_MS
+      ? {
+          breakerCooldownMs: integerSetting(
+            "JEV_BREAKER_COOLDOWN_MS",
+            env.JEV_BREAKER_COOLDOWN_MS,
+            0,
+            0,
+          ),
+        }
+      : {}),
   } as DecisionConfig;
 
   // The getter stays available to the transport but outside ordinary object enumeration.

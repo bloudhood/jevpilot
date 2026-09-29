@@ -18,6 +18,12 @@ const privateRanges = [
   "198.18.0.0/15",
   "::/128",
   "::1/128",
+  // IPv4-compatible remnants (::a.b.c.d) with their own /96 range; :: and ::1 stay exact.
+  "::/96",
+  // IPv4-VPN translation (RFC 8215) alongside the well-known NAT64 prefix.
+  "64:ff9b:1::/48",
+  // 6to4 with an embedded IPv4 host part.
+  "2002::/16",
   "fc00::/7",
   "fe80::/10",
 ];
@@ -67,7 +73,15 @@ export function validCidr(value: string): boolean {
   const parts = value.split("/");
   if (parts.length !== 2 || !parts[0] || !parts[1] || !/^\d+$/u.test(parts[1])) return false;
   const address = bytes(parts[0]);
-  return !!address && Number(parts[1]) <= address.length * 8;
+  if (!address) return false;
+  const bits = Number(parts[1]);
+  if (bits > address.length * 8) return false;
+  // Host bits outside the prefix must be zero: "10.0.0.1/8" is rejected, use "10.0.0.0/8".
+  return address.every((byte, index) => {
+    const remaining = bits - index * 8;
+    const mask = remaining >= 8 ? 255 : remaining <= 0 ? 0 : (255 << (8 - remaining)) & 255;
+    return (byte & ~mask & 255) === 0;
+  });
 }
 
 export function blockedAddress(address: string, guard: NetworkGuard): boolean {
@@ -122,4 +136,42 @@ export async function blockedUrl(
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+const resolverRule = /^MAP\s+(\S+)\s+(\S+)$/u;
+
+/**
+ * Build an AddressLookup that mirrors Chrome's --host-resolver-rules MAP entries so the
+ * guard resolves hosts exactly like the browser it protects (Chrome applies these rules
+ * after DNS; a deployment using them desyncs guard and browser if the guard ignores them).
+ * Mapped hostnames resolve to their mapped address without touching DNS. Unmapped
+ * hostnames fall through to the underlying lookup.
+ */
+export function lookupWithResolverRules(
+  extraArgs: readonly string[] | undefined,
+  fallback: AddressLookup = dnsLookup,
+): AddressLookup {
+  const maps = new Map<string, string>();
+  for (const argument of extraArgs ?? []) {
+    if (!argument.startsWith("--host-resolver-rules")) continue;
+    const value = argument.slice(argument.indexOf("=") + 1);
+    for (const rule of value.split(",")) {
+      const match = resolverRule.exec(rule.trim());
+      if (match) maps.set(match[1]!.toLowerCase(), match[2]!);
+    }
+  }
+  if (maps.size === 0) return fallback;
+  return async (hostname, options) => {
+    const mapped = maps.get(hostname.toLowerCase());
+    if (mapped === undefined) return fallback(hostname, options);
+    // Chrome's mapping syntax is HOST[:PORT]; the port never affects the resolved address.
+    const address = mapped.replace(/:\d+$/u, "");
+    if (isIP(address)) return [{ address, family: isIP(address) }];
+    // A mapping to another hostname chains one level (Chrome resolves the replacement).
+    const chained = maps.get(address.toLowerCase());
+    const chainedAddress = chained?.replace(/:\d+$/u, "");
+    if (chainedAddress !== undefined && isIP(chainedAddress))
+      return [{ address: chainedAddress, family: isIP(chainedAddress) }];
+    return fallback(address, options);
+  };
 }

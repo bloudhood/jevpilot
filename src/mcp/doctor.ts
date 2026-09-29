@@ -71,20 +71,16 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorResu
   const env = options.env ?? process.env;
   const out = options.out ?? ((line: string) => process.stdout.write(`${line}\n`));
   const checks: DoctorCheck[] = [];
+  const envName = (name: string): boolean =>
+    name === "JEV_API_KEY" ||
+    name === "JEVPILOT_HTTP_TOKEN" ||
+    name.startsWith("JEVPILOT_SECRET_") ||
+    name.endsWith("_API_KEY") ||
+    name.endsWith("_API_TOKEN") ||
+    name.endsWith("_TOKEN") ||
+    /(?:PASSWORD|SECRET|KEY)$/.test(name);
   const secrets = Object.entries(env)
-    .filter(
-      ([name, value]) =>
-        value &&
-        (name === "JEV_API_KEY" ||
-          name === "JEVPILOT_HTTP_TOKEN" ||
-          name.startsWith("JEVPILOT_SECRET_") ||
-          [
-            "TYPESAFE_API_KEY",
-            "OPENROUTER_API_KEY",
-            "JEV_CLOUDFLARE_API_TOKEN",
-            "CLOUDFLARE_API_TOKEN",
-          ].includes(name)),
-    )
+    .filter(([name, value]) => value && envName(name))
     .map(([, value]) => value!)
     .sort((a, b) => b.length - a.length);
   const safe = (detail: string) =>
@@ -203,7 +199,7 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorResu
   try {
     await loaded?.cleanup();
   } catch (error) {
-    add("temp", "fail", `browser profile cleanup failed: ${errorMessage(error)}`);
+    add("browser-profile", "fail", `browser profile cleanup failed: ${errorMessage(error)}`);
   }
 
   const result = { ok: checks.every((check) => check.status !== "fail"), checks };

@@ -4,6 +4,7 @@ import { z } from "zod";
 import {
   blockedAddress,
   blockedUrl,
+  lookupWithResolverRules,
   type NetworkGuard,
   type AddressLookup,
 } from "../../security/address-guard.ts";
@@ -1208,6 +1209,11 @@ export function createCdpDriver(deps: LaunchDeps & { lookup?: AddressLookup } = 
           (arg) => arg.startsWith("--proxy-server") || arg.startsWith("--proxy-pac-url"),
         ) &&
           !profile.proxy);
+      // The guard must resolve hosts the way this browser does: mirror any
+      // --host-resolver-rules MAP entries unless a caller supplied its own lookup.
+      const effectiveLookup =
+        deps.lookup ??
+        lookupWithResolverRules(profile.kind === "attach" ? undefined : profile.extraArgs);
       const browser = await launchBrowser(profile, options, deps);
       const capabilities = {
         ...cdpCapabilities,
@@ -1257,7 +1263,7 @@ export function createCdpDriver(deps: LaunchDeps & { lookup?: AddressLookup } = 
             await browser.disposeContext(contextId);
           },
           networkGuard,
-          deps.lookup,
+          effectiveLookup,
           checkResponseAddress,
         );
         pages.set(page.id, page);
@@ -1288,7 +1294,11 @@ export function createCdpDriver(deps: LaunchDeps & { lookup?: AddressLookup } = 
           let popupSession: BrowserSession | undefined;
           let popupPage: CdpPageHandle | undefined;
           try {
-            const initialBlocked = await blockedUrl(target.url ?? "", networkGuard, deps.lookup);
+            const initialBlocked = await blockedUrl(
+              target.url ?? "",
+              networkGuard,
+              effectiveLookup,
+            );
             if (initialBlocked) {
               await browser.client.call("Target.closeTarget", { targetId: target.targetId });
               return;
@@ -1302,7 +1312,7 @@ export function createCdpDriver(deps: LaunchDeps & { lookup?: AddressLookup } = 
             const currentUrl = await popupSession.targetUrl().catch(() => "");
             if (
               page.blockedRequest() ||
-              (await blockedUrl(currentUrl, networkGuard, deps.lookup))
+              (await blockedUrl(currentUrl, networkGuard, effectiveLookup))
             ) {
               await page.close();
               return;
@@ -1349,7 +1359,7 @@ export function createCdpDriver(deps: LaunchDeps & { lookup?: AddressLookup } = 
         const page = [...pages.values()].find((candidate) => candidate.ownsFrame(event.frameId));
         if (!page) return;
         void (async () => {
-          if (await blockedUrl(event.url, networkGuard, deps.lookup)) {
+          if (await blockedUrl(event.url, networkGuard, effectiveLookup)) {
             await browser.client
               .call("Browser.cancelDownload", { guid: event.guid })
               .catch(() => {});

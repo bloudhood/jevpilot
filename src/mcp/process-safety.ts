@@ -23,5 +23,8 @@ export function installProcessSafety(stop: () => Promise<void>): void {
     process.stderr.write(`jevpilot-mcp uncaughtException: ${errorClass(error)}\n`);
     process.exitCode = 1;
     void stop().catch(() => {});
+    // If graceful shutdown hangs (a stuck browser or transport), exit anyway.
+    const forceExit = setTimeout(() => process.exit(1), 10_000);
+    forceExit.unref?.();
   });
 }

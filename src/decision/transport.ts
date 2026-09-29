@@ -12,7 +12,12 @@ export type TransportDeps = {
 export const defaultDeps: TransportDeps = {
   fetch: globalThis.fetch,
   clock: Date,
-  sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  // Unref'd so an in-flight backoff sleep cannot hold the process open during shutdown.
+  sleep: (milliseconds) =>
+    new Promise((resolve) => {
+      const timer = setTimeout(resolve, milliseconds);
+      timer.unref?.();
+    }),
   random: Math.random,
 };
 
