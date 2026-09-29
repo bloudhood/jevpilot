@@ -206,6 +206,18 @@ const entersForm = (name: string): boolean => keyOf(name) === "Enter";
 // Enter and Space activate the focused button or link, as a click would.
 const activatesFocus = (name: string): boolean =>
   entersForm(name) || keyOf(name) === "Space" || keyOf(name) === " ";
+const samePage = (left: string, right: string): boolean => {
+  const withoutHash = (url: string): string => {
+    try {
+      const parsed = new URL(url);
+      parsed.hash = "";
+      return parsed.href;
+    } catch {
+      return url;
+    }
+  };
+  return withoutHash(left) === withoutHash(right);
+};
 const domainOf = (url: string): string | undefined => {
   try {
     return new URL(url).hostname.toLowerCase();
@@ -317,6 +329,8 @@ export class OrchestratorSession {
   epoch = 0;
   pendingGatedAction?: {
     action: Action;
+    /** The page the gate was raised on; an approval does not carry over to another page. */
+    url: string;
     epoch: number;
     ref: string;
     fingerprint: string;
@@ -1527,6 +1541,7 @@ export class OrchestratorSession {
       if (domain) {
         this.pendingGatedAction = {
           action,
+          url: observation.url,
           epoch: target!.epoch,
           ref: target!.ref,
           fingerprint: target!.fingerprint,
@@ -1565,6 +1580,7 @@ export class OrchestratorSession {
     if (matched && !this.constraints.allow_irreversible && !approved) {
       this.pendingGatedAction = {
         action,
+        url: observation.url,
         epoch: target!.epoch,
         ref: target!.ref,
         fingerprint: target!.fingerprint,
@@ -2032,6 +2048,7 @@ export class OrchestratorSession {
             if (element)
               this.pendingGatedAction = {
                 action: outcome.pendingAction,
+                url: observation.url,
                 ...target,
                 role: element.role,
                 name: element.name,
@@ -2163,7 +2180,9 @@ export class OrchestratorSession {
       delete this.pendingGatedAction;
       try {
         const current = await this.sample();
-        const refreshed = this.retargetAction(pending.action, pending, current.observation);
+        const refreshed = samePage(pending.url, current.observation.url)
+          ? this.retargetAction(pending.action, pending, current.observation)
+          : undefined;
         if (!refreshed) return this.handoff("uncertain", { missing: "stored target changed" });
         const result = await this.execute(
           refreshed,

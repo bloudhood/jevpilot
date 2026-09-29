@@ -5221,3 +5221,38 @@ test("R4: encoded and cut-off echoes of a secret are redacted in results and dec
     await instance.session.close();
   }
 });
+
+test("R6: an approval does not carry over to another page", async () => {
+  const buy = element("Buy now", "button", { ref: "e1" });
+  for (const [next, expected] of [
+    ["http://example.test/start#details", "executed"],
+    ["http://example.test/other", "refused"],
+    ["http://other.test/start", "refused"],
+  ] as const) {
+    let url = "http://example.test/start";
+    const instance = fixture({
+      observe: async () => observation([buy], "start", url),
+      outcomes: [{ type: "act", action: action(buy) }],
+      options: { budget: { steps: 1 } },
+    });
+    try {
+      assert.equal((await instance.session.run()).status, "CONFIRM_REQUIRED");
+      url = next;
+      const resumed = await instance.session.resume({ allow_irreversible: true });
+      if (expected === "executed") {
+        assert.equal(instance.seen.actions.length, 1, next);
+      } else {
+        assert.equal(resumed.status, "UNCERTAIN", next);
+        assert.match(resumed.question, /stored target changed/u);
+        assert.equal(instance.seen.actions.length, 0, next);
+        // The approval is spent: coming back to the page does not revive it.
+        url = "http://example.test/start";
+        const again = await instance.session.resume({ allow_irreversible: true });
+        assert.notEqual(again.status, "DONE_VERIFIED");
+        assert.equal(instance.seen.actions.length, 0, next);
+      }
+    } finally {
+      await instance.session.close();
+    }
+  }
+});
