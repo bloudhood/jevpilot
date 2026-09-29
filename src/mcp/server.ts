@@ -222,11 +222,13 @@ export function createServer(deps: McpDeps): {
 
   const markBrowserDisconnected = (handle: BrowserHandle): void => {
     if (browser !== handle) return;
-    for (const id of sessions.keys()) {
+    for (const [id, instance] of sessions) {
       disconnectedSessions.add(id);
       if (disconnectedSessions.size > 256)
         disconnectedSessions.delete(disconnectedSessions.values().next().value!);
       sessions.delete(id);
+      // Closing the session removes its handoff screenshots; closing its tab fails, which is ignored.
+      void instance.close().catch(() => {});
       const directory = screenshotDirs.get(id);
       screenshotDirs.delete(id);
       if (directory) void rm(directory, { recursive: true, force: true }).catch(() => {});

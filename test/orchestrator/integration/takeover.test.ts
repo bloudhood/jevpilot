@@ -83,6 +83,9 @@ const pages: Record<string, string> = {
   "/date-fields": `<title>Date fields</title><label>Day <input type="date" id="day"></label><label>Time <input type="time" id="time"></label><label>Month <input type="month" id="month"></label><output id="changes"></output><script>
     document.querySelectorAll('input').forEach(field => field.addEventListener('change', () => { document.querySelector('#changes').textContent += field.id + ':' + field.value + ';'; }));
   </script>`,
+  "/buy-keys": `<title>Buy keys</title><button type="button" id="buy" style="width:140px;height:40px" onclick="document.title='bought'">Buy now</button>
+    <div id="remove" style="cursor:pointer;width:160px;height:40px;background:#ddd" tabindex="0" onclick="document.title='removed'">Delete account</div>
+    <form onsubmit="event.preventDefault(); document.title='ordered'"><label>Quantity <input id="quantity" name="quantity" style="width:80px;height:28px"></label><button type="submit" style="width:140px;height:40px">Place order</button></form>`,
   "/key-fields": `<title>Key fields</title><label>Letters <input id="letters" style="width:180px;height:32px"></label>`,
   "/pointer-cards": `<title>Cards</title><style>.card { cursor:pointer;width:220px;height:48px;display:block;margin:10px }</style>
     <div class="card" id="plain"><span>First</span> <span>course</span></div>
@@ -816,6 +819,57 @@ describe("M5a real Chrome takeover", { skip: skipped }, () => {
         { action: "press_key", ref: refFor(filled, "Query"), key: "Enter" },
       ]);
       assert.match(result.url, /\/results\?q=paper/u);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("R3: Enter, Space, a typed submit and a clickable div wait for approval in a real page", async () => {
+    const title = (page: PageHandle) => page.callIsolated(() => document.title, []);
+    for (const key of ["Enter", "Space"]) {
+      const { session, page } = await opened("/buy-keys");
+      try {
+        const initial = await session.observe();
+        const blocked = await session.act([
+          { action: "press_key", ref: refFor(initial, "Buy now"), key },
+        ]);
+        assert.equal(blocked.status, "CONFIRM_REQUIRED", key);
+        assert.equal(await title(page), "Buy keys", key);
+        // Focus moved to the button by the keyboard alone, then Enter without a ref.
+        await page.callIsolated(() => document.getElementById("buy")?.focus(), []);
+        const again = await session.act([{ action: "press_key", key }]);
+        assert.equal(again.status, "CONFIRM_REQUIRED", key);
+        assert.equal(await title(page), "Buy keys", key);
+        const approved = await session.act(
+          [{ action: "press_key", ref: refFor(initial, "Buy now"), key }],
+          { allow_irreversible: true },
+        );
+        assert.notEqual(approved.status, "CONFIRM_REQUIRED", key);
+        assert.equal(await title(page), "bought", key);
+      } finally {
+        await session.close();
+      }
+    }
+    const { session, page } = await opened("/buy-keys");
+    try {
+      const initial = await session.observe();
+      const typed = await session.act([
+        { action: "type", ref: refFor(initial, "Quantity"), text: "2", submit: true },
+      ]);
+      assert.equal(typed.status, "CONFIRM_REQUIRED");
+      assert.equal(await title(page), "Buy keys");
+      assert.equal(
+        await page.callIsolated(
+          () => (document.getElementById("quantity") as HTMLInputElement).value,
+          [],
+        ),
+        "",
+      );
+      const div = await session.act([{ action: "click", ref: refFor(initial, "Delete account") }]);
+      assert.equal(div.status, "CONFIRM_REQUIRED");
+      assert.equal(await title(page), "Buy keys");
+      const approved = await session.resume({ allow_irreversible: true });
+      assert.notEqual(approved.status, "CONFIRM_REQUIRED");
     } finally {
       await session.close();
     }

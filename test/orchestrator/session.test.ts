@@ -5256,3 +5256,52 @@ test("R6: an approval does not carry over to another page", async () => {
     }
   }
 });
+
+test("R6: a dialog that is already gone no longer holds the session", async () => {
+  const dialog = { kind: "confirm" as const, message: "Proceed?", defaultPrompt: "" };
+  for (const answer of ["resume", "act"] as const) {
+    const instance = fixture({
+      detect,
+      outcomes: [
+        { type: "act", action: action() },
+        { type: "handoff", reason: "info_not_on_page", source: "code", details: {} },
+      ],
+      execute: () => ({ ...changed(), outcome: "dialog-opened", dialog }),
+    });
+    let attempts = 0;
+    instance.page.handleDialog = async () => {
+      attempts++;
+      throw new CdpProtocolError(-32602, "No dialog is showing", "Page.handleJavaScriptDialog");
+    };
+    try {
+      assert.equal((await instance.session.run()).status, "CONFIRM_REQUIRED");
+      const answered =
+        answer === "resume"
+          ? await instance.session.resume({ dialog: { accept: true } })
+          : await instance.session.act([{ action: "dialog", accept: true }]);
+      assert.notEqual(answered.reason, "operation_failed", answer);
+      assert.equal(attempts, 1, answer);
+      assert.notEqual((await instance.session.observe()).status, "CONFIRM_REQUIRED", answer);
+      assert.equal(attempts, 1, answer);
+    } finally {
+      await instance.session.close();
+    }
+  }
+  // Any other failure to answer is still reported.
+  const failing = fixture({
+    detect,
+    outcomes: [{ type: "act", action: action() }],
+    execute: () => ({ ...changed(), outcome: "dialog-opened", dialog }),
+  });
+  failing.page.handleDialog = async () => {
+    throw new CdpProtocolError(-32000, "Something else failed", "Page.handleJavaScriptDialog");
+  };
+  try {
+    assert.equal((await failing.session.run()).status, "CONFIRM_REQUIRED");
+    const result = await failing.session.resume({ dialog: { accept: true } });
+    assert.equal(result.status, "FAILED");
+    assert.equal((await failing.session.observe()).status, "CONFIRM_REQUIRED");
+  } finally {
+    await failing.session.close();
+  }
+});

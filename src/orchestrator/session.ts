@@ -206,6 +206,11 @@ const entersForm = (name: string): boolean => keyOf(name) === "Enter";
 // Enter and Space activate the focused button or link, as a click would.
 const activatesFocus = (name: string): boolean =>
   entersForm(name) || keyOf(name) === "Space" || keyOf(name) === " ";
+const dialogGone = (error: unknown): boolean =>
+  error instanceof Error &&
+  error.name === "CdpProtocolError" &&
+  (error as Error & { code?: unknown }).code === -32602 &&
+  /no dialog is showing/iu.test(error.message);
 const samePage = (left: string, right: string): boolean => {
   const withoutHash = (url: string): string => {
     try {
@@ -1366,7 +1371,11 @@ export class OrchestratorSession {
       promptText = resolved;
     }
     const started = this.deps.now();
-    await this.page.handleDialog(accept, promptText);
+    await this.page.handleDialog(accept, promptText).catch((error: unknown) => {
+      // The dialog can be gone before it is answered (its frame was removed or the page moved on); a
+      // record of it would otherwise hold the session at this handoff for good.
+      if (!dialogGone(error)) throw error;
+    });
     delete this.pendingDialog;
     this.steps++;
     this.invocationSteps++;

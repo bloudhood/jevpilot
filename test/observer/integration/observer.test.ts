@@ -205,24 +205,24 @@ describe("real Chrome page Observer", { skip: skipped }, () => {
           String(question.criteria[buttons[0]!.ref]),
           /Sauce Labs Backpack.*item 1 of 6/u,
         );
-        test("open shadow-root text and headings enter the observation", async () =>
-          withPage("/shadow-content", async (page) => {
-            const state = await observe(page);
-            assert.match(state.text, /Archive collection details/u);
-            assert.ok(state.headings.some((heading) => heading.text === "Shadow headline"));
-            assert.ok(state.elements.some((element) => element.name === "Open item"));
-          }));
-        test("first observation waits for delayed content after navigation", async () =>
-          withPage("/delayed-content", async (page) => {
-            const state = await observe(page);
-            assert.match(state.text, /Complete after delay/u);
-            assert.ok((state.timings.settleMs ?? 0) >= 700);
-          }));
         assert.match(
           String(question.criteria[buttons[5]!.ref]),
           /Test\.allTheThings T-Shirt.*item 6 of 6/u,
         );
       }
+    }));
+  test("open shadow-root text and headings enter the observation", async () =>
+    withPage("/shadow-content", async (page) => {
+      const state = await observe(page);
+      assert.match(state.text, /Archive collection details/u);
+      assert.ok(state.headings.some((heading) => heading.text === "Shadow headline"));
+      assert.ok(state.elements.some((element) => element.name === "Open item"));
+    }));
+  test("first observation waits for delayed content after navigation", async () =>
+    withPage("/delayed-content", async (page) => {
+      const state = await observe(page);
+      assert.match(state.text, /Complete after delay/u);
+      assert.ok((state.timings.settleMs ?? 0) >= 700);
     }));
 
   test("long article selects a late fact for its goal", async () =>
