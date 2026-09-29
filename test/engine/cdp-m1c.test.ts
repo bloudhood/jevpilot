@@ -1236,6 +1236,9 @@ test("R1: a popup that fails to attach leaves no page behind", async () => {
           (message.params as { targetId?: string }).targetId === "popup",
       ),
     );
+    // The close request is sent before its response is handled: wait for the failed popup to be
+    // gone instead of counting pages the moment the request is seen.
+    await waitUntil(() => host.browser.pages().length === 1);
     assert.equal(host.browser.pages().length, 1);
     host.event(
       "Page.javascriptDialogOpening",
