@@ -4,6 +4,7 @@ import { isAbsolute, join, relative, sep } from "node:path";
 import { createOwnedTempDir } from "../util/owned-temp.ts";
 import { createDecisionPort } from "../decision/port.ts";
 import { appendCalibrationRecord, calibrationRequestRecord } from "./decision-log.ts";
+import { redactSecret } from "./redact.ts";
 import {
   CircuitOpenError,
   ContextLimitError,
@@ -548,8 +549,7 @@ export class OrchestratorSession {
   }
   private scrub(value: string): string {
     let clean = value;
-    for (const secret of this.secretLiterals)
-      if (secret) clean = clean.replaceAll(secret, "[REDACTED]");
+    for (const secret of this.secretLiterals) clean = redactSecret(clean, secret);
     for (const item of Object.values(this.values))
       if (isSecret(item)) clean = clean.replaceAll(item.secret_ref, "[REDACTED]");
     return clean;

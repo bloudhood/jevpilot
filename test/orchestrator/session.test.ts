@@ -5172,3 +5172,52 @@ test("R3: typing with submit into a form with an irreversible submit button wait
     await outside.session.close();
   }
 });
+
+test("R4: encoded and cut-off echoes of a secret are redacted in results and decision requests", async () => {
+  const secret = "Pa$$ w0rd/9?&=+ long-token-value-0123456789-abcdefghijklmnopqrstuvwxyz-tail";
+  const encoded = encodeURIComponent(secret);
+  const cutOff = secret.slice(0, 60);
+  const page = observation(
+    [
+      element("Show password", "button", { ref: "e1" }),
+      element("Token", "textbox", { ref: "e2", tag: "input", inputType: "text", value: cutOff }),
+      element(`Copy ${cutOff}`, "button", { ref: "e3", containerText: `Signed in ${encoded}` }),
+    ],
+    "start",
+    `http://example.test/login?password=${encoded}`,
+  );
+  page.title = `Sign in ${encoded.slice(0, 20)}`;
+  page.text = `Wrong password ${secret.replace(/ /gu, "+")} for user`;
+  const seen: string[] = [];
+  const instance = fixture({
+    observations: [page],
+    buildDecisionState: (input) => {
+      seen.push(JSON.stringify(input.observation));
+      return { state: { observation: input.observation }, questions: {}, reductions: [] };
+    },
+    decide: async (request) => {
+      seen.push(JSON.stringify(request));
+      return decision;
+    },
+    outcomes: [{ type: "handoff", reason: "uncertain", source: "code", details: {} }],
+  });
+  (instance.session as unknown as { secretLiterals: Set<string> }).secretLiterals.add(secret);
+  try {
+    const result = await instance.session.run();
+    const returned = JSON.stringify(result);
+    for (const text of [...seen, returned]) {
+      assert.ok(text.includes("[REDACTED]"));
+      for (const leak of [
+        encoded,
+        encoded.slice(0, 20),
+        cutOff,
+        cutOff.slice(0, 12),
+        secret.replace(/ /gu, "+"),
+      ])
+        assert.equal(text.includes(leak), false, leak);
+    }
+    assert.equal(seen.length, 2);
+  } finally {
+    await instance.session.close();
+  }
+});
