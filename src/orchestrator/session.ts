@@ -23,6 +23,7 @@ import {
   orderFindings,
   detectorMarkerSelectors,
   irreversibleActionMatch,
+  irreversibleMatch,
   type DetectorInput,
   type Finding,
 } from "../detectors/detect.ts";
@@ -38,6 +39,7 @@ import type { Action, ActionResult, Target } from "../executor/types.ts";
 import { formatObservation } from "../observer/format.ts";
 import { pageMatches } from "../observer/matches.ts";
 import { observe } from "../observer/observe.ts";
+import { formSubmitNames } from "../observer/page-snapshot.ts";
 import type { Observation, ObserveOptions } from "../observer/types.ts";
 import type { SessionResult, SessionStatus, SessionTrace } from "./result.ts";
 import {
@@ -566,9 +568,10 @@ export class OrchestratorSession {
     this.lastProvider = decision.provider;
     this.lastModel = decision.model;
   }
-  private scrub(value: string): string {
+  private scrub(value: string, partial = true): string {
     let clean = value;
-    for (const secret of this.secretLiterals) clean = redactSecret(clean, secret);
+    for (const secret of [...this.secretLiterals].sort((left, right) => right.length - left.length))
+      clean = redactSecret(clean, secret, partial);
     for (const item of Object.values(this.values))
       if (isSecret(item)) clean = clean.replaceAll(item.secret_ref, "[REDACTED]");
     return clean;
@@ -578,7 +581,12 @@ export class OrchestratorSession {
     if (Array.isArray(value)) return value.map((item) => this.scrubDeep(item)) as T;
     if (value && typeof value === "object")
       return Object.fromEntries(
-        Object.entries(value).map(([key, item]) => [key, this.scrubDeep(item)]),
+        Object.entries(value).map(([key, item]) => [
+          key,
+          typeof item === "string" && ["role", "tag", "inputType"].includes(key)
+            ? this.scrub(item, false)
+            : this.scrubDeep(item),
+        ]),
       ) as T;
     return value;
   }
@@ -1565,11 +1573,12 @@ export class OrchestratorSession {
         return this.handoff("confirm_required", { domain, targetName: element.name });
       }
     }
+    const submitsForm =
+      action.kind === "submit" ||
+      (action.kind === "type" && action.submit === true) ||
+      (action.kind === "key" && entersForm(action.name));
     const submitButton =
-      (action.kind === "submit" ||
-        (action.kind === "type" && action.submit === true) ||
-        (action.kind === "key" && entersForm(action.name))) &&
-      element?.formId
+      submitsForm && element?.formId
         ? observation.elements.find(
             (item) =>
               item.formId === element.formId &&
@@ -1579,13 +1588,21 @@ export class OrchestratorSession {
               irreversibleActionMatch(item),
           )
         : undefined;
-    const matched = submitButton
-      ? irreversibleActionMatch(submitButton)
-      : action.kind === "key"
-        ? element && activatesFocus(action.name)
-          ? irreversibleActionMatch(element)
-          : undefined
-        : element && irreversibleActionMatch(element);
+    const pageSubmitName =
+      !submitButton && submitsForm && element?.formId && target
+        ? (await formSubmitNames(this.page, target.epoch, target.ref).catch(() => [])).find(
+            (name) => irreversibleMatch(name),
+          )
+        : undefined;
+    const submitName = submitButton?.name ?? pageSubmitName;
+    const matched =
+      submitName !== undefined
+        ? irreversibleMatch(submitName)
+        : action.kind === "key"
+          ? element && activatesFocus(action.name)
+            ? irreversibleActionMatch(element)
+            : undefined
+          : element && irreversibleActionMatch(element);
     if (matched && !this.constraints.allow_irreversible && !approved) {
       this.pendingGatedAction = {
         action,
@@ -1602,7 +1619,7 @@ export class OrchestratorSession {
         reason: matched,
       };
       return this.handoff("confirm_required", {
-        targetName: submitButton?.name ?? element?.name,
+        targetName: submitName ?? element?.name,
         matched,
       });
     }
@@ -1647,6 +1664,8 @@ export class OrchestratorSession {
     }
     const ms = Math.max(0, this.deps.now() - started);
     this.lastExecutedActionAt = this.deps.now();
+    if (result.outcome === "not-focusable")
+      return this.handoff("uncertain", { missing: "target cannot be focused" });
     if (
       action.kind === "type" &&
       element &&

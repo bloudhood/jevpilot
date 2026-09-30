@@ -379,9 +379,10 @@ export function pageSnapshot(options: SnapshotOptions): Omit<Observation, "timin
   const textParts: string[] = [];
   const scanLimit = options.textScanChars ?? options.maxTextChars;
   if (textRoot) textParts.push(composedText(textRoot, scanLimit));
-  const text = textParts
-    .join("\n")
-    .slice(0, Math.max(0, options.textScanChars ?? options.maxTextChars));
+  const text = clean(
+    textParts.join("\n"),
+    Math.max(0, options.textScanChars ?? options.maxTextChars),
+  );
   const headings = composedElements(document)
     .filter((element) => /^(?:h1|h2|h3)$/u.test(element.localName))
     .filter((element) => visible(element, rectOf(element)))
@@ -739,33 +740,75 @@ export function waitForRef(
     );
 }
 
-export async function focusRef(page: PageHandle, epoch: number, ref: string): Promise<void> {
+export async function focusRef(page: PageHandle, epoch: number, ref: string): Promise<boolean> {
   if (ref.startsWith("frame:")) {
     const separator = ref.indexOf("/");
     const marker = ref.lastIndexOf("@", separator);
     const frame = (await page.frames()).find((item) => item.id === ref.slice(6, marker));
-    if (!frame) return;
+    if (!frame) return false;
     try {
-      await frame.callIsolated(focusRefInPage, [
+      return await frame.callIsolated(focusRefInPage, [
         Number(ref.slice(marker + 1, separator)),
         ref.slice(separator + 1),
       ]);
     } catch (error) {
       if (!(error instanceof FrameGoneError)) throw error;
     }
-    return;
+    return false;
   }
-  await page.callIsolated(focusRefInPage, [epoch, ref]);
+  return page.callIsolated(focusRefInPage, [epoch, ref]);
 }
 
-export function focusRefInPage(epoch: number, ref: string): void {
+export function focusRefInPage(epoch: number, ref: string): boolean {
   const global = globalThis as typeof globalThis & {
     __jevpilotObserverRegistry?: { epoch: number; refs: Map<string, WeakRef<Element>> };
   };
   const registry = global.__jevpilotObserverRegistry;
-  if (registry?.epoch !== epoch) return;
+  if (registry?.epoch !== epoch) return false;
   const element = registry.refs.get(ref)?.deref();
-  if (element?.isConnected) (element as HTMLElement).focus();
+  if (!element?.isConnected || !("focus" in element)) return false;
+  (element as HTMLElement).focus();
+  return (element.getRootNode() as Document | ShadowRoot).activeElement === element;
+}
+
+export async function formSubmitNames(
+  page: PageHandle,
+  epoch: number,
+  ref: string,
+): Promise<string[]> {
+  if (ref.startsWith("frame:")) {
+    const separator = ref.indexOf("/");
+    const marker = ref.lastIndexOf("@", separator);
+    const frame = (await page.frames()).find((item) => item.id === ref.slice(6, marker));
+    if (!frame) return [];
+    return frame.callIsolated(formSubmitNamesInPage, [
+      Number(ref.slice(marker + 1, separator)),
+      ref.slice(separator + 1),
+    ]);
+  }
+  return page.callIsolated(formSubmitNamesInPage, [epoch, ref]);
+}
+
+export function formSubmitNamesInPage(epoch: number, ref: string): string[] {
+  const global = globalThis as typeof globalThis & {
+    __jevpilotObserverLibrary?: ObserverPageLibrary;
+    __jevpilotObserverRegistry?: { epoch: number; refs: Map<string, WeakRef<Element>> };
+  };
+  const registry = global.__jevpilotObserverRegistry;
+  if (registry?.epoch !== epoch) return [];
+  const element = registry.refs.get(ref)?.deref();
+  const form = (element as HTMLInputElement | undefined)?.form;
+  const library = global.__jevpilotObserverLibrary;
+  if (!element?.isConnected || !form || !library) return [];
+  return [...form.elements]
+    .filter((control) => {
+      const type = (control as HTMLInputElement).type;
+      return (
+        (control.localName === "button" && (!type || type === "submit")) ||
+        (control.localName === "input" && ["submit", "image"].includes(type))
+      );
+    })
+    .map((control) => library.nameOf(control));
 }
 
 export function resolveRefInPage(
@@ -1075,9 +1118,9 @@ export function resolveRefInPage(
       ? {
           coveredBy: {
             role: coverIdentity!.getAttribute("role") || coverIdentity!.localName,
-            name: (coverIdentity!.getAttribute("aria-label") || coverIdentity!.textContent || "")
-              .trim()
-              .slice(0, 80),
+            name: library.clean(
+              coverIdentity!.getAttribute("aria-label") || coverIdentity!.textContent,
+            ),
           },
         }
       : {}),
@@ -1087,7 +1130,7 @@ export function resolveRefInPage(
           value:
             (element as HTMLElement).isContentEditable &&
             (element.getAttribute("role") === "textbox" || element.hasAttribute("contenteditable"))
-              ? (element as HTMLElement).innerText.slice(0, 60)
+              ? library.clean((element as HTMLElement).innerText, 60)
               : (control.value ?? ""),
         }),
     checked: control.checked ?? false,

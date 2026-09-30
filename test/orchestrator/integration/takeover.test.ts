@@ -87,6 +87,17 @@ const pages: Record<string, string> = {
     <div id="remove" style="cursor:pointer;width:160px;height:40px;background:#ddd" tabindex="0" onclick="document.title='removed'">Delete account</div>
     <form onsubmit="event.preventDefault(); document.title='ordered'"><label>Quantity <input id="quantity" name="quantity" style="width:80px;height:28px"></label><button type="submit" style="width:140px;height:40px">Place order</button></form>`,
   "/key-fields": `<title>Key fields</title><label>Letters <input id="letters" style="width:180px;height:32px"></label>`,
+  "/approval-focus": `<title>Approval focus</title>
+    <button type="button" id="delete" onclick="document.getElementById('deleted').textContent=String(Number(document.getElementById('deleted').textContent)+1)">Delete account</button>
+    <output id="deleted">0</output>
+    <form onsubmit="event.preventDefault(); document.getElementById('searched').textContent=String(Number(document.getElementById('searched').textContent)+1)">
+      <label>Search query <input type="search" name="q"></label><button type="submit">Search</button>
+    </form><output id="searched">0</output>`,
+  "/long-order": `<title>Long order</title>
+    <form onsubmit="event.preventDefault(); document.getElementById('submitted').textContent='submitted'">
+      <label>Quantity <input name="quantity"></label>
+      <div style="height:4000px"></div><button type="submit">Place order</button>
+    </form><output id="submitted">not submitted</output>`,
   "/pointer-cards": `<title>Cards</title><style>.card { cursor:pointer;width:220px;height:48px;display:block;margin:10px }</style>
     <div class="card" id="plain"><span>First</span> <span>course</span></div>
     <div class="card" id="linked"><a href="/destination">Linked course</a></div>
@@ -819,6 +830,99 @@ describe("M5a real Chrome takeover", { skip: skipped }, () => {
         { action: "press_key", ref: refFor(filled, "Query"), key: "Enter" },
       ]);
       assert.match(result.url, /\/results\?q=paper/u);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("R9: an approved Enter reaches the approved button in a real page after focus moved", async () => {
+    const page = await browser.newPage();
+    const navigation = await page.navigate(`${base}/approval-focus`);
+    const session = new OrchestratorSession(
+      {
+        page,
+        navigation,
+        goal: "Delete the fixture account",
+        constraints: { allowed_domains: ["127.0.0.1"] },
+      },
+      {
+        buildDecisionState: () => ({ state: {}, questions: {}, reductions: [] }),
+        decide: async () => ({
+          answers: {},
+          usage: { inputTokens: 0, outputTokens: 0 },
+          model: "scripted",
+          provider: "scripted",
+          latencyMs: 0,
+          attempts: 1,
+        }),
+        interpret: () => ({
+          type: "handoff",
+          reason: "info_not_on_page",
+          source: "code",
+          details: {},
+        }),
+        tempDir: () => mkdtemp(join(directory, "handoff-")),
+      },
+    );
+    const counters = () =>
+      page.callIsolated(
+        () => ({
+          deleted: Number(document.getElementById("deleted")!.textContent),
+          searched: Number(document.getElementById("searched")!.textContent),
+        }),
+        [],
+      );
+    try {
+      const initial = await session.observe();
+      const gated = await session.act([
+        { action: "key", name: "Enter", ref: refFor(initial, "Delete account") },
+      ]);
+      assert.equal(gated.status, "CONFIRM_REQUIRED");
+      assert.deepEqual(await counters(), { deleted: 0, searched: 0 });
+      running(
+        await session.act([
+          { action: "click", ref: refFor(await session.observe(), "Search query") },
+        ]),
+      );
+      assert.equal(
+        await page.callIsolated(() => (document.activeElement as HTMLInputElement).name, []),
+        "q",
+      );
+      const resumed = await session.resume({ allow_irreversible: true });
+      assert.equal(resumed.status, "INFO_NOT_ON_PAGE", JSON.stringify(resumed));
+      assert.deepEqual(await counters(), { deleted: 1, searched: 0 });
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("R9: typing with submit into a long form waits for approval when its Place order button is far below the viewport", async () => {
+    const { session, page } = await opened("/long-order");
+    try {
+      const initial = await session.observe();
+      assert.doesNotMatch(initial.snapshot, /button\s+"Place order"/u);
+      assert.ok(
+        await page.callIsolated(
+          () => document.querySelector('button[type="submit"]')!.getBoundingClientRect().top > 4000,
+          [],
+        ),
+      );
+      const result = await session.act([
+        { action: "type", ref: refFor(initial, "Quantity"), text: "2", submit: true },
+      ]);
+      assert.equal(result.status, "CONFIRM_REQUIRED");
+      assert.match(result.question, /Approve "Place order"/u);
+      assert.equal(
+        await page.callIsolated(() => document.getElementById("submitted")!.textContent, []),
+        "not submitted",
+      );
+      assert.equal(
+        await page.callIsolated(
+          () => (document.querySelector("input") as HTMLInputElement).value,
+          [],
+        ),
+        "",
+      );
     } finally {
       await session.close();
     }

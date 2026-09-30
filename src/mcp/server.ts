@@ -34,6 +34,25 @@ const requireHttpUrl = (url: string): void => {
   if (!/^https?:$/u.test(new URL(url).protocol))
     throw new McpUserError("Only http: and https: URLs may be navigated.");
 };
+const abortableNavigation = async <T>(
+  operation: Promise<T>,
+  signal: AbortSignal,
+  browser: BrowserHandle,
+): Promise<T> => {
+  let interrupt!: () => void;
+  const interrupted = new Promise<never>((_, reject) => {
+    interrupt = () => reject(new Error("navigation interrupted"));
+  });
+  const unsubscribe = browser.onDisconnected(interrupt);
+  signal.addEventListener("abort", interrupt, { once: true });
+  if (signal.aborted || !browser.connected) interrupt();
+  try {
+    return await Promise.race([operation, interrupted]);
+  } finally {
+    unsubscribe();
+    signal.removeEventListener("abort", interrupt);
+  }
+};
 const values = z.record(
   z.union([
     z.string(),
@@ -173,19 +192,22 @@ export function createServer(deps: McpDeps): {
     {
       schema: z.ZodTypeAny;
       output: z.ZodTypeAny;
-      handler: (args: never) => Promise<CallToolResult>;
+      handler: (args: never, extra: { signal: AbortSignal }) => Promise<CallToolResult>;
     }
   >();
   function registerTool<S extends z.ZodRawShape>(
     name: string,
     config: { description: string; inputSchema: S; outputSchema: z.ZodRawShape },
-    callback: (input: z.output<z.ZodObject<S>>) => Promise<CallToolResult>,
+    callback: (
+      input: z.output<z.ZodObject<S>>,
+      extra: { signal: AbortSignal },
+    ) => Promise<CallToolResult>,
   ): void {
     registrations.push((server) => server.registerTool(name, config, callback as never));
     dispatch.set(name, {
       schema: z.object(config.inputSchema),
       output: z.object(config.outputSchema),
-      handler: callback as (args: never) => Promise<CallToolResult>,
+      handler: callback as (args: never, extra: { signal: AbortSignal }) => Promise<CallToolResult>,
     });
   }
   const sessions = new Map<string, OrchestratorSession>();
@@ -446,7 +468,7 @@ export function createServer(deps: McpDeps): {
       inputSchema: runInput,
       outputSchema: sessionResultSchema.shape,
     },
-    (input) =>
+    (input, extra) =>
       !deps.decisionPort
         ? Promise.resolve(result(noDecisionPort()))
         : handle("browser_run", async () => {
@@ -533,20 +555,22 @@ export function createServer(deps: McpDeps): {
                 input.navigation_timeout_ms ?? deps.navigationTimeoutMs ?? 30_000;
               const navigationStarted = performance.now();
               const navigation = input.url
-                ? await page
-                    .navigate(input.url, { timeoutMs: navigationTimeoutMs })
-                    .catch((error: unknown) => ({
-                      url: input.url!,
-                      headers: {},
-                      failure:
-                        error instanceof Error && error.name === "CdpTimeoutError"
-                          ? "timeout"
-                          : error instanceof Error && error.name === "CdpDisconnectedError"
-                            ? "disconnected"
-                            : error instanceof Error && error.name === "CdpProtocolError"
-                              ? "protocol"
-                              : "navigation_error",
-                    }))
+                ? await abortableNavigation(
+                    page.navigate(input.url, { timeoutMs: navigationTimeoutMs }),
+                    extra.signal,
+                    active,
+                  ).catch((error: unknown) => ({
+                    url: input.url!,
+                    headers: {},
+                    failure:
+                      error instanceof Error && error.name === "CdpTimeoutError"
+                        ? "timeout"
+                        : error instanceof Error && error.name === "CdpDisconnectedError"
+                          ? "disconnected"
+                          : error instanceof Error && error.name === "CdpProtocolError"
+                            ? "protocol"
+                            : "navigation_error",
+                  }))
                 : undefined;
               const navigationMs = navigation ? performance.now() - navigationStarted : undefined;
               const instance = new OrchestratorSession(
@@ -627,9 +651,24 @@ export function createServer(deps: McpDeps): {
                     : {}),
                 },
               );
+              const unusable = (): boolean =>
+                extra.signal.aborted || browser !== active || !active.connected;
+              const discard = async (): Promise<never> => {
+                registered();
+                sessions.delete(instance.id);
+                await instance.close().catch(() => {});
+                if (browser !== active || !active.connected)
+                  throw new BrowserDisconnectedError(instance.id);
+                throw new McpUserError("Request cancelled.");
+              };
+              if (unusable()) await discard();
               sessions.set(instance.id, instance);
               registered();
-              return await inSession(instance, () => instance.run());
+              try {
+                return await inSession(instance, () => instance.run());
+              } finally {
+                if (unusable()) await discard();
+              }
             } catch (error) {
               registered();
               if (![...sessions.values()].some((item) => item.page === page))
@@ -914,7 +953,7 @@ export function createServer(deps: McpDeps): {
     }
     const server = new McpServer({ name: "jevpilot", version });
     for (const register of registrations) register(server);
-    server.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    server.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       const tool = dispatch.get(request.params.name);
       if (!tool) throw new McpError(ErrorCode.InvalidParams, "Unknown tool");
       const parsed = tool.schema.safeParse(request.params.arguments);
@@ -927,7 +966,7 @@ export function createServer(deps: McpDeps): {
           `Invalid tool arguments: ${paths.slice(0, 10).join(", ")}`,
         );
       }
-      const response = await tool.handler(parsed.data as never);
+      const response = await tool.handler(parsed.data as never, extra);
       if (!response.isError && !tool.output.safeParse(response.structuredContent).success)
         return failure("Tool returned an invalid result.");
       return response;

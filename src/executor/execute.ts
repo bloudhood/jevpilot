@@ -560,6 +560,13 @@ export async function executeAction(
         await send(page.back());
         break;
       case "key":
+        if (
+          action.target &&
+          !(await focusRef(page, action.target.epoch, action.target.ref).catch(() => false))
+        ) {
+          inputMs = performance.now() - inputStart;
+          return result("not-focusable");
+        }
         await send(page.key(action.name));
         break;
       case "wait":

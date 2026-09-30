@@ -7,6 +7,7 @@ import { realpath } from "node:fs/promises";
 import { test } from "node:test";
 import type { DecisionResult } from "../../src/decision/types.ts";
 import { MockDecider } from "../../src/decision/mock.ts";
+import { tagAnswers } from "../../src/decision/validate.ts";
 import {
   CircuitOpenError,
   ContextLimitError,
@@ -30,7 +31,12 @@ import {
   type SessionOptions,
 } from "../../src/orchestrator/session.ts";
 import { FakePageHandle } from "../support/fake-engine.ts";
-import { normalizeDateLike } from "../../src/executor/execute.ts";
+import { executeAction, normalizeDateLike } from "../../src/executor/execute.ts";
+import { runInNewContext } from "node:vm";
+import {
+  installObserverLibrary,
+  type ObserverPageLibrary,
+} from "../../src/observer/page-library.ts";
 import { UnknownKeyError } from "../../src/browser/input.ts";
 import { readFile } from "node:fs/promises";
 import { answersFor } from "../support/mcp-fixture.ts";
@@ -819,6 +825,281 @@ function fixture(
   const session = new OrchestratorSession({ page, goal: "finish", ...overrides.options }, deps);
   return { page, session, clock, seen };
 }
+
+test("R9: an approved Enter is pressed on the approved control after focus moved", async () => {
+  for (const canFocus of [true, false]) {
+    let epoch = 0;
+    let reordered = false;
+    let current: Observation;
+    let focused = "";
+    const inputs: { kind: string; ref: string; epoch?: number }[] = [];
+    const snapshot = (): Observation => {
+      epoch++;
+      current = {
+        ...observation([
+          element("Delete account", "button", {
+            ref: reordered ? "e11" : "e1",
+            fingerprint: "delete",
+          }),
+          element("Search", "textbox", {
+            ref: reordered ? "e12" : "e2",
+            fingerprint: "search",
+            tag: "input",
+            inputType: "search",
+            rect: { x: 200, y: 0, width: 100, height: 30 },
+          }),
+        ]),
+        epoch,
+      };
+      return current;
+    };
+    const instance = fixture({
+      observe: async () => snapshot(),
+      executeAction,
+      outcomes: [{ type: "handoff", reason: "info_not_on_page", source: "code", details: {} }],
+    });
+    instance.page.callIsolated = async (fn, args) => {
+      if (["focusObservedRef", "focusRefInPage"].includes(fn.name)) {
+        assert.equal(args[0], current.epoch);
+        assert.ok(current.elements.some((item) => item.ref === args[1]));
+        if (fn.name === "focusRefInPage" && !canFocus) return false as never;
+        focused = String(args[1]);
+        inputs.push({ kind: "focus", ref: focused, epoch: Number(args[0]) });
+        return true as never;
+      }
+      if (fn.name === "resolveRefInPage") {
+        const item = current.elements.find((item) => item.ref === args[1]);
+        assert.ok(item);
+        return { status: "ok", visible: true, enabled: true, rect: item.rect } as never;
+      }
+      if (fn.name === "pageSnapshot") return snapshot() as never;
+      if (fn.name === "waitForNavigationQuiet") return 0 as never;
+      return undefined as never;
+    };
+    instance.page.click = async () => {
+      focused = current.elements[1]!.ref;
+      inputs.push({ kind: "click", ref: focused });
+      reordered = true;
+      return {};
+    };
+    instance.page.key = async (name) => {
+      inputs.push({ kind: name, ref: focused });
+      return {};
+    };
+    try {
+      await instance.session.observe();
+      const initialRef = current!.elements[0]!.ref;
+      assert.equal(
+        (await instance.session.act([{ action: "key", name: "Enter", ref: initialRef }])).status,
+        "CONFIRM_REQUIRED",
+      );
+      assert.equal(
+        inputs.some((item) => item.kind === "Enter"),
+        false,
+      );
+      await instance.session.observe();
+      await instance.session.act([{ action: "click", ref: current!.elements[1]!.ref }]);
+      assert.equal(inputs.at(-1)?.kind, "click");
+      const resumed = await instance.session.resume({ allow_irreversible: true });
+      const approved = instance.seen.actions.at(-1);
+      assert.equal(approved?.kind, "key");
+      if (approved?.kind !== "key") throw new Error("expected approved key");
+      assert.notEqual(approved.target?.ref, initialRef);
+      if (canFocus) {
+        assert.notEqual(resumed.status, "FAILED");
+        assert.deepEqual(inputs.slice(-2), [
+          { kind: "focus", ref: approved.target!.ref, epoch: approved.target!.epoch },
+          { kind: "Enter", ref: approved.target!.ref },
+        ]);
+      } else {
+        assert.equal(resumed.status, "UNCERTAIN");
+        assert.match(resumed.question, /target cannot be focused/u);
+        assert.equal(
+          inputs.some((item) => item.kind === "Enter"),
+          false,
+        );
+      }
+    } finally {
+      await instance.session.close();
+    }
+  }
+});
+
+test("R9: Enter and submit in a form whose irreversible button is not observed ask the page for its submit controls", async () => {
+  const field = element("Quantity", "textbox", {
+    tag: "input",
+    inputType: "text",
+    formId: "order",
+  });
+  for (const names of [["Place order"], ["Search"], undefined]) {
+    for (const kind of ["key", "submit"] as const) {
+      const chosen: Action =
+        kind === "key"
+          ? {
+              kind,
+              name: "Enter",
+              target: { epoch: 1, ref: field.ref, fingerprint: field.fingerprint },
+            }
+          : { kind, target: { epoch: 1, ref: field.ref, fingerprint: field.fingerprint } };
+      const instance = fixture({
+        observations: [observation([field])],
+        outcomes: [{ type: "act", action: chosen }],
+        options: { budget: { steps: 1 } },
+      });
+      const requests: unknown[][] = [];
+      instance.page.callIsolated = async (fn, args) => {
+        if (fn.name === "formSubmitNamesInPage") {
+          requests.push(args);
+          if (!names) throw new Error("page query failed");
+          return names as never;
+        }
+        return true as never;
+      };
+      try {
+        const result =
+          kind === "key"
+            ? await instance.session.act([{ action: "key", name: "Enter", ref: field.ref }])
+            : await instance.session.run();
+        assert.deepEqual(requests, [[1, field.ref]]);
+        if (names?.[0] === "Place order") {
+          assert.equal(result.status, "CONFIRM_REQUIRED", kind);
+          assert.match(result.question, /Approve "Place order"/u);
+          assert.equal(instance.seen.actions.length, 0);
+        } else {
+          assert.equal(result.status, "BUDGET_EXHAUSTED", kind);
+          assert.equal(instance.seen.actions[0]?.kind, kind);
+        }
+      } finally {
+        await instance.session.close();
+      }
+    }
+  }
+});
+
+test("R9: a password that starts with a common word leaves labels and the field type alone", async () => {
+  const variable = "JEVPILOT_SECRET_R9_COMMON";
+  const previous = process.env[variable];
+  try {
+    for (const secret of ["password1!", "Password1!"]) {
+      process.env[variable] = secret;
+      const field = element("Password", "textbox", {
+        tag: "input",
+        inputType: "password",
+        ariaLabel: "Password",
+        required: true,
+        value: "",
+      });
+      const seen: Observation[] = [];
+      const requests: Parameters<SessionDeps["decide"]>[0][] = [];
+      const instance = fixture({
+        observations: [observation([field])],
+        options: {
+          values: {
+            credential: { secret_ref: `env:${variable}`, origins: ["http://example.test"] },
+          },
+        },
+        buildDecisionState: (context) => {
+          seen.push(context.observation);
+          return buildDecisionState(context);
+        },
+        decide: async (request) => {
+          requests.push(request);
+          return { ...decision, answers: tagAnswers(request.questions, answersFor(request)) };
+        },
+        outcomes: [{ type: "handoff", reason: "uncertain", source: "code", details: {} }],
+      });
+      try {
+        await instance.session.act([{ action: "type", ref: field.ref, value_key: "credential" }]);
+        assert.equal(instance.seen.values[0]?.credential, secret);
+        field.value = secret;
+        await instance.session.run();
+        assert.equal(seen.at(-1)?.elements[0]?.value, "[filled]");
+        field.value = "";
+        await instance.session.run();
+        const sent = seen.at(-1)!.elements[0]!;
+        assert.equal(sent.inputType, "password");
+        assert.equal(sent.name, "Password");
+        assert.equal(sent.ariaLabel, "Password");
+        const question = requests.at(-1)!.questions.value_for_e1;
+        assert.equal(question?.type, "choice");
+        if (question?.type !== "choice") throw new Error("expected value_for choice");
+        assert.ok(Object.hasOwn(question.criteria, "credential"));
+        const state = requests.at(-1)!.state as Record<string, unknown>;
+        assert.match(String(state.page_observation), /"Password"/u);
+      } finally {
+        await instance.session.close();
+      }
+    }
+  } finally {
+    if (previous === undefined) delete process.env[variable];
+    else process.env[variable] = previous;
+  }
+});
+
+test("R9: a secret cut short by the observer is still redacted", async () => {
+  const secret = `common-word-${"abcdefghij".repeat(12)}`;
+  const context: { __jevpilotObserverLibrary?: ObserverPageLibrary } = {};
+  runInNewContext(`(${installObserverLibrary.toString()})()`, context);
+  const clean = context.__jevpilotObserverLibrary!.clean;
+  const page = observation([
+    element(clean(secret, 80), "textbox", { tag: "input", value: clean(secret, 60) }),
+  ]);
+  page.text = `Ordinary ${secret.slice(0, 8)} text. ${clean(secret, 100)}`;
+  const seen: Observation[] = [];
+  const instance = fixture({
+    observations: [page],
+    buildDecisionState: (input) => {
+      seen.push(input.observation);
+      return { state: { observation: input.observation }, questions: {}, reductions: [] };
+    },
+    outcomes: [{ type: "handoff", reason: "uncertain", source: "code", details: {} }],
+  });
+  (instance.session as unknown as { secretLiterals: Set<string> }).secretLiterals.add(secret);
+  try {
+    assert.ok(page.elements[0]!.name.endsWith("…"));
+    assert.ok(page.elements[0]!.value!.endsWith("…"));
+    const result = await instance.session.run();
+    assert.equal(seen[0]?.elements[0]?.name, "[REDACTED]…");
+    assert.equal(seen[0]?.elements[0]?.value, "[REDACTED]…");
+    assert.equal(seen[0]?.text, `Ordinary ${secret.slice(0, 8)} text. [REDACTED]…`);
+    assert.ok(result.snapshot.includes(`Ordinary ${secret.slice(0, 8)} text.`));
+    assert.equal(result.snapshot.includes(secret.slice(0, 59)), false);
+  } finally {
+    await instance.session.close();
+  }
+});
+
+test("R9: a secret that extends another secret is fully redacted", async () => {
+  const secrets = ["password", "password123456"];
+  const page = observation([element(secrets[1]!, "button")]);
+  page.text = `${secrets[0]} and ${secrets[1]} and ${encodeURIComponent(secrets[1]!)}`;
+  page.title = secrets[1]!;
+  const requests: string[] = [];
+  const instance = fixture({
+    observations: [page],
+    buildDecisionState,
+    decide: async (request) => {
+      requests.push(JSON.stringify(request));
+      return { ...decision, answers: tagAnswers(request.questions, answersFor(request)) };
+    },
+    outcomes: [{ type: "handoff", reason: "uncertain", source: "code", details: {} }],
+  });
+  const literals = (instance.session as unknown as { secretLiterals: Set<string> }).secretLiterals;
+  for (const secret of secrets) literals.add(secret);
+  try {
+    const result = await instance.session.run();
+    assert.equal(result.title, "[REDACTED]");
+    assert.match(result.snapshot, /page: \[REDACTED\] and \[REDACTED\] and \[REDACTED\]/u);
+    assert.equal(requests.length, 1);
+    for (const text of [JSON.stringify(result), ...requests]) {
+      assert.ok(text.includes("[REDACTED]"));
+      assert.equal(text.includes("123456"), false);
+      assert.equal(text.includes("password"), false);
+    }
+  } finally {
+    await instance.session.close();
+  }
+});
 
 test("R2: Enter in a field of an irreversible form waits for approval", async () => {
   const field = element("Order quantity", "textbox", {
@@ -5176,7 +5457,7 @@ test("R3: typing with submit into a form with an irreversible submit button wait
 test("R4: encoded and cut-off echoes of a secret are redacted in results and decision requests", async () => {
   const secret = "Pa$$ w0rd/9?&=+ long-token-value-0123456789-abcdefghijklmnopqrstuvwxyz-tail";
   const encoded = encodeURIComponent(secret);
-  const cutOff = secret.slice(0, 60);
+  const cutOff = `${secret.slice(0, 60)}…`;
   const page = observation(
     [
       element("Show password", "button", { ref: "e1" }),
@@ -5186,7 +5467,7 @@ test("R4: encoded and cut-off echoes of a secret are redacted in results and dec
     "start",
     `http://example.test/login?password=${encoded}`,
   );
-  page.title = `Sign in ${encoded.slice(0, 20)}`;
+  page.title = `Sign in ${encoded.slice(0, 20)}…`;
   page.text = `Wrong password ${secret.replace(/ /gu, "+")} for user`;
   const seen: string[] = [];
   const instance = fixture({

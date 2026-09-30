@@ -60,7 +60,7 @@ Claude Code (`.mcp.json`):
       "args": [
         "-y",
         "--package",
-        "https://github.com/bloudhood/jevpilot/releases/download/v0.1.1/jevpilot-0.1.1.tgz",
+        "https://github.com/bloudhood/jevpilot/releases/download/v0.2.0/jevpilot-0.2.0.tgz",
         "jevpilot-mcp"
       ],
       "env": { "JEV_PROVIDER": "openrouter", "JEV_API_KEY": "${JEV_API_KEY}" }
@@ -74,7 +74,7 @@ Codex (`config.toml`):
 ```toml
 [mcp_servers.jevpilot]
 command = "npx"
-args = ["-y", "--package", "https://github.com/bloudhood/jevpilot/releases/download/v0.1.1/jevpilot-0.1.1.tgz", "jevpilot-mcp"]
+args = ["-y", "--package", "https://github.com/bloudhood/jevpilot/releases/download/v0.2.0/jevpilot-0.2.0.tgz", "jevpilot-mcp"]
 env = { JEV_PROVIDER = "openrouter" }
 env_vars = ["JEV_API_KEY"]
 ```

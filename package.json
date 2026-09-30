@@ -1,6 +1,6 @@
 {
   "name": "jevpilot",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Fast Jev browser MCP server: Jev (TypeSafe System One) drives a real Chrome step by step for AI agents and hands back early when unsure.",
   "keywords": [
     "jev",

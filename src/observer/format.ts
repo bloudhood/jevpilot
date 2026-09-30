@@ -5,13 +5,20 @@ import type { Observation, ObservedElement } from "./types.ts";
 // start a line of its own in the observation.
 const oneLine = (value: string): string => value.replace(/[\p{C}\p{Z}\s]+/gu, " ");
 
+export function truncateText(text: string, limit: number): string {
+  if (text.length <= limit) return text;
+  if (limit <= 0) return "";
+  const prefix = text.slice(0, limit - 1);
+  return prefix.endsWith("…") ? prefix : `${prefix}…`;
+}
+
 export function shortenHref(href: string, pageUrl: string): string {
   try {
     const page = new URL(pageUrl);
     const target = new URL(href, page);
     if (target.protocol !== "http:" && target.protocol !== "https:") {
       const flat = oneLine(href);
-      return flat.slice(0, 59) + (flat.length > 60 ? "…" : "");
+      return truncateText(flat, 60);
     }
     if (
       target.origin === page.origin &&
@@ -69,7 +76,7 @@ export function formatObservation(
       `page: ${text}`,
     ].join("\n");
   while (estimateTokens(render()) > maxTokens && text.length > 0)
-    text = text.slice(0, Math.floor(text.length * 0.7));
+    text = truncateText(text, Math.floor(text.length * 0.7));
   while (estimateTokens(render()) > maxTokens && elements.length > 0) {
     const lowest = elements.reduce(
       (selected, element, index) =>

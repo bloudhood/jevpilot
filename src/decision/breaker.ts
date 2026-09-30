@@ -19,6 +19,7 @@ export class CircuitBreaker {
     operation: () => Promise<T>,
     countFailure: (error: unknown) => boolean = () => true,
   ): Promise<T> {
+    let ownsProbe = false;
     if (this.openedAt !== undefined) {
       // Single-probe half-open: while a probe is in flight, all other callers fail fast
       // even after the cooldown elapses. A probe that hangs keeps this window open until
@@ -27,6 +28,7 @@ export class CircuitBreaker {
         throw new CircuitOpenError("decision circuit open");
       }
       this.probing = true;
+      ownsProbe = true;
     }
 
     try {
@@ -41,7 +43,7 @@ export class CircuitBreaker {
       }
       throw error;
     } finally {
-      this.probing = false;
+      if (ownsProbe) this.probing = false;
     }
   }
 }

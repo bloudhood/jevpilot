@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { EventEmitter } from "node:events";
+import type { ChildProcess } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { BrowserConfigError, DialogBlockingError } from "../../src/browser/errors.ts";
 import { createCdpDriver } from "../../src/engine/cdp/driver.ts";
-import { FrameGoneError, type PageEvents } from "../../src/engine/types.ts";
+import { FrameGoneError, type BrowserHandle, type PageEvents } from "../../src/engine/types.ts";
 import { fakeCdp, type Message, type Send } from "../browser/fake-cdp.ts";
 import { parseNetworkGuard } from "../../src/mcp/network-guard.ts";
+import { loadMcpProfile } from "../../src/mcp/profile.ts";
 import {
   blockedUrl,
   checkUrl,
@@ -51,6 +54,7 @@ async function fixture(
     blockedClick?: boolean;
     blockedIsolated?: boolean;
     manageDownloads?: boolean;
+    isolated?: boolean;
     vanishOffset?: boolean;
     childFrameTree?: (message: Message, send: Send) => boolean;
     childSetup?: (message: Message, send: Send) => boolean;
@@ -179,12 +183,16 @@ async function fixture(
                     },
                   }
                 : method === "DOM.describeNode"
-                  ? { node: { nodeName: "INPUT", backendNodeId: 7, attributes: ["type", "file"] } }
+                  ? {
+                      node: { nodeName: "INPUT", backendNodeId: 7, attributes: ["type", "file"] },
+                    }
                   : method === "DOM.getFrameOwner"
                     ? { backendNodeId: 8 }
                     : method === "DOM.resolveNode"
                       ? { object: { objectId: "iframe-object" } }
-                      : {};
+                      : method === "Target.createBrowserContext"
+                        ? { browserContextId: "isolated-1" }
+                        : {};
     send({ id: message.id, result });
   });
   const driver = createCdpDriver({
@@ -204,7 +212,9 @@ async function fixture(
         : { manageDownloads: options.manageDownloads }),
     },
   );
-  const page = await browser.newPage();
+  const page = await browser.newPage(
+    options.isolated ? { isolated: { copyCookies: false } } : undefined,
+  );
   return {
     sent,
     event: (method: string, params: unknown, sessionId?: string) =>
@@ -292,17 +302,10 @@ test("O3: a paused document request is failed when its host resolves to a blocke
       errorReason: "BlockedByClient",
     });
     assert.equal(byRequest.get("r2")?.method, "Fetch.continueRequest");
-    // R5: a lookup that failed leaves the host unchecked, so the request is not sent; a name that does
-    // not exist is left to the browser, which fails it too. Neither ends the session.
-    assert.deepEqual(byRequest.get("r3")?.params, {
-      requestId: "r3",
-      errorReason: "NameNotResolved",
-    });
+    // Metadata mode leaves unverified hosts and missing names to the browser.
+    assert.equal(byRequest.get("r3")?.method, "Fetch.continueRequest");
     assert.equal(byRequest.get("r6")?.method, "Fetch.continueRequest");
-    assert.deepEqual(byRequest.get("r7")?.params, {
-      requestId: "r7",
-      errorReason: "NameNotResolved",
-    });
+    assert.equal(byRequest.get("r7")?.method, "Fetch.continueRequest");
     assert.equal(byRequest.get("r4")?.method, "Fetch.failRequest");
     // After the main document commits, an iframe request paused on the page's session is a child block.
     host.event(
@@ -475,6 +478,99 @@ test("dialog events map fields and pending confirm rejects isolated calls", asyn
   }
 });
 
+test("R9: an unverified host is refused in private mode and loads in metadata mode", async () => {
+  for (const mode of ["private", "metadata", "off"] as const) {
+    const host = await fixture({
+      networkGuard: parseNetworkGuard(mode, "203.0.113.0/24"),
+      manageDownloads: true,
+      lookup: async (hostname) => {
+        if (hostname === "error.test") throw new Error("resolver failed");
+        return new Promise(() => {});
+      },
+    });
+    try {
+      const popups: string[] = [];
+      const downloads: PageEvents["download"][] = [];
+      const blocks: PageEvents["requestBlocked"][] = [];
+      host.page.on("popup", (popup) => popups.push(popup.id));
+      host.page.on("download", (event) => downloads.push(event));
+      host.page.on("requestBlocked", (event) => blocks.push(event));
+      host.event("Page.frameNavigated", { frame: { id: "main", url: "about:blank" } }, "s1");
+      for (const name of ["slow", "error"]) {
+        const url = `http://${name}.test/`;
+        host.event(
+          "Fetch.requestPaused",
+          { requestId: name, frameId: "main", resourceType: "Document", request: { url } },
+          "s1",
+        );
+        host.event("Target.targetCreated", {
+          targetInfo: { type: "page", targetId: `popup-${name}`, openerId: "page", url },
+        });
+        host.event("Browser.downloadWillBegin", {
+          guid: name,
+          frameId: "main",
+          url: `${url}file`,
+          suggestedFilename: "file.txt",
+        });
+        host.event("Browser.downloadProgress", { guid: name, state: "completed" });
+      }
+      const answers = () =>
+        host.sent.filter((message) =>
+          ["Fetch.failRequest", "Fetch.continueRequest"].includes(String(message.method)),
+        );
+      const cancelled = () =>
+        host.sent.filter((message) => message.method === "Browser.cancelDownload");
+      const closed = () => host.sent.filter((message) => message.method === "Target.closeTarget");
+      await waitUntil(() => answers().length === 2, 5000);
+      if (mode === "private") {
+        await waitUntil(() => cancelled().length === 2 && closed().length === 2, 5000);
+        assert.deepEqual(
+          answers().map((message) => ({ method: message.method, params: message.params })),
+          ["error", "slow"].map((requestId) => ({
+            method: "Fetch.failRequest",
+            params: { requestId, errorReason: "NameNotResolved" },
+          })),
+        );
+        assert.deepEqual(
+          cancelled().map((message) => message.params),
+          [{ guid: "error" }, { guid: "slow" }],
+        );
+        assert.deepEqual(
+          closed().map((message) => message.params),
+          [{ targetId: "popup-error" }, { targetId: "popup-slow" }],
+        );
+        assert.deepEqual(popups, []);
+        assert.deepEqual(downloads, []);
+        assert.deepEqual(
+          host.browser.pages().map((page) => page.id),
+          ["page"],
+        );
+      } else {
+        await waitUntil(() => popups.length === 2 && downloads.length === 4, 5000);
+        assert.deepEqual(
+          answers().map((message) => ({ method: message.method, params: message.params })),
+          ["error", "slow"].map((requestId) => ({
+            method: "Fetch.continueRequest",
+            params: { requestId },
+          })),
+        );
+        assert.deepEqual(popups.sort(), ["popup-error", "popup-slow"]);
+        assert.deepEqual(downloads.map((event) => `${event.id} ${event.state}`).sort(), [
+          "error completed",
+          "error started",
+          "slow completed",
+          "slow started",
+        ]);
+        assert.deepEqual(cancelled(), []);
+        assert.deepEqual(closed(), []);
+      }
+      assert.deepEqual(blocks, [], "unverified hosts do not trigger an address policy block");
+    } finally {
+      await host.close();
+    }
+  }
+});
+
 test("alerts can be left for the caller to handle", async () => {
   const host = await fixture({ autoAcceptAlerts: false });
   try {
@@ -610,6 +706,225 @@ test("O3: a download from a blocked address is cancelled and never reported", as
     );
   } finally {
     await host.close();
+  }
+});
+
+test("R9: a rejected download in an isolated session is cancelled in its own browser context", async () => {
+  const host = await fixture({ manageDownloads: true, isolated: true });
+  try {
+    assert.deepEqual(
+      host.sent.find((message) => message.method === "Target.createTarget")?.params,
+      { url: "about:blank", browserContextId: "isolated-1" },
+    );
+    const events: PageEvents["download"][] = [];
+    host.page.on("download", (event) => events.push(event));
+    host.event("Page.frameNavigated", { frame: { id: "main", url: "about:blank" } }, "s1");
+    host.event("Browser.downloadWillBegin", {
+      guid: "blocked-isolated",
+      frameId: "main",
+      url: "http://169.254.169.254/latest/meta-data/iam",
+      suggestedFilename: "iam.txt",
+    });
+    await waitUntil(() => host.sent.some((message) => message.method === "Browser.cancelDownload"));
+    assert.deepEqual(
+      host.sent.find((message) => message.method === "Browser.cancelDownload")?.params,
+      { guid: "blocked-isolated", browserContextId: "isolated-1" },
+    );
+    assert.deepEqual(events, []);
+  } finally {
+    await host.close();
+  }
+});
+
+test("R9: the guard applies resolver rules from a profile file's extraArgs", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "jevpilot-r9-profile-"));
+  const path = join(directory, "profile.json");
+  const sent: Message[] = [];
+  let sendEvent: Send = () => {};
+  let nextTarget = 0;
+  const fake = await fakeCdp((message, send) => {
+    sent.push(message);
+    sendEvent = send;
+    const method = String(message.method);
+    send({
+      id: message.id,
+      result:
+        method === "Target.getTargets"
+          ? { targetInfos: [] }
+          : method === "Target.createTarget"
+            ? { targetId: `page-${++nextTarget}` }
+            : method === "Target.attachToTarget"
+              ? { sessionId: `session-${nextTarget}` }
+              : {},
+    });
+  });
+  const child = Object.assign(new EventEmitter(), {
+    pid: 901,
+    exitCode: null,
+    signalCode: null,
+  }) as ChildProcess;
+  let browser: BrowserHandle | undefined;
+  try {
+    await writeFile(
+      path,
+      JSON.stringify({
+        kind: "desktop-chrome",
+        display: "headed",
+        executable: "fake-chrome",
+        userDataDir: join(directory, "browser"),
+        windowSize: { width: 1000, height: 700 },
+        extraArgs: ["--host-resolver-rules=MAP *.internal.test 169.254.169.254"],
+      }),
+      "utf8",
+    );
+    const loaded = await loadMcpProfile({ JEVPILOT_PROFILE_FILE: path });
+    browser = await createCdpDriver({
+      platform: "linux",
+      spawn: (() => child) as never,
+      kill: () => {
+        Object.assign(child, { exitCode: 0 });
+        child.emit("exit", 0, null);
+      },
+      readFile: async () => `${new URL(fake.url).port}\n/devtools/browser/test\n`,
+      cdpOptions: { websocketFactory: () => new WebSocket(fake.url) },
+    }).launch(loaded.profile, { selfCheck: false });
+    const page = await browser.newPage();
+    const blocks: PageEvents["requestBlocked"][] = [];
+    page.on("requestBlocked", (event) => blocks.push(event));
+    const sessionId = sent.find((message) => message.method === "Fetch.enable")?.sessionId;
+    assert.equal(sessionId, "session-2");
+    sendEvent({
+      method: "Fetch.requestPaused",
+      sessionId,
+      params: {
+        requestId: "mapped",
+        frameId: "main",
+        resourceType: "Document",
+        request: { url: "http://service.internal.test/" },
+      },
+    });
+    await waitUntil(() => blocks.length === 1);
+    assert.deepEqual(blocks, [
+      { url: "http://service.internal.test/", address: "169.254.169.254", frame: "main" },
+    ]);
+    assert.deepEqual(sent.find((message) => message.method === "Fetch.failRequest")?.params, {
+      requestId: "mapped",
+      errorReason: "BlockedByClient",
+    });
+    assert.equal(
+      sent.some((message) => message.method === "Fetch.continueRequest"),
+      false,
+    );
+    await loaded.cleanup();
+  } finally {
+    await browser?.close();
+    await fake.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("R9: behind a configured proxy private mode lets an unverified host load", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "jevpilot-r9-proxy-"));
+  const sent: Message[] = [];
+  let sendEvent: Send = () => {};
+  let nextTarget = 0;
+  const fake = await fakeCdp((message, send) => {
+    sent.push(message);
+    sendEvent = send;
+    const method = String(message.method);
+    send({
+      id: message.id,
+      result:
+        method === "Target.getTargets"
+          ? { targetInfos: [] }
+          : method === "Target.createTarget"
+            ? { targetId: `page-${++nextTarget}` }
+            : method === "Target.attachToTarget"
+              ? { sessionId: `session-${nextTarget}` }
+              : {},
+    });
+  });
+  const child = Object.assign(new EventEmitter(), {
+    pid: 902,
+    exitCode: null,
+    signalCode: null,
+  }) as ChildProcess;
+  let browser: BrowserHandle | undefined;
+  try {
+    // The proxy resolves names, so a local lookup that never answers says nothing about the host.
+    browser = await createCdpDriver({
+      platform: "linux",
+      spawn: (() => child) as never,
+      kill: () => {
+        Object.assign(child, { exitCode: 0 });
+        child.emit("exit", 0, null);
+      },
+      readFile: async () => `${new URL(fake.url).port}\n/devtools/browser/test\n`,
+      cdpOptions: { websocketFactory: () => new WebSocket(fake.url) },
+      lookup: () => new Promise(() => {}),
+    }).launch(
+      {
+        kind: "desktop-chrome",
+        display: "headed",
+        executable: "fake-chrome",
+        userDataDir: join(directory, "browser"),
+        windowSize: { width: 1000, height: 700 },
+        proxy: "http://127.0.0.1:9",
+      },
+      { selfCheck: false, networkGuard: parseNetworkGuard("private"), manageDownloads: true },
+    );
+    const page = await browser.newPage();
+    const downloads: PageEvents["download"][] = [];
+    page.on("download", (event) => downloads.push(event));
+    const sessionId = sent.find((message) => message.method === "Fetch.enable")?.sessionId;
+    sendEvent({
+      method: "Page.frameNavigated",
+      sessionId,
+      params: { frame: { id: "main", url: "about:blank" } },
+    });
+    sendEvent({
+      method: "Fetch.requestPaused",
+      sessionId,
+      params: {
+        requestId: "proxied",
+        frameId: "main",
+        resourceType: "Document",
+        request: { url: "http://slow.test/" },
+      },
+    });
+    sendEvent({
+      method: "Browser.downloadWillBegin",
+      params: {
+        guid: "proxied-download",
+        frameId: "main",
+        url: "http://slow.test/file",
+        suggestedFilename: "file.txt",
+      },
+    });
+    await waitUntil(() => downloads.length === 1, 5000);
+    assert.equal(
+      sent.some((message) => message.method === "Browser.cancelDownload"),
+      false,
+    );
+    await waitUntil(
+      () =>
+        sent.some((message) =>
+          ["Fetch.failRequest", "Fetch.continueRequest"].includes(String(message.method)),
+        ),
+      5000,
+    );
+    assert.deepEqual(
+      sent
+        .filter((message) =>
+          ["Fetch.failRequest", "Fetch.continueRequest"].includes(String(message.method)),
+        )
+        .map((message) => ({ method: message.method, params: message.params })),
+      [{ method: "Fetch.continueRequest", params: { requestId: "proxied" } }],
+    );
+  } finally {
+    await browser?.close();
+    await fake.close();
+    await rm(directory, { recursive: true, force: true });
   }
 });
 

@@ -4,11 +4,19 @@ import { request } from "node:http";
 import { test } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createServer, type McpDeps } from "../../src/mcp/server.ts";
 import { parseHttpConfig, startHttpServer, type HttpConfig } from "../../src/mcp/http.ts";
 import { fakeMcpDeps } from "../support/mcp-fixture.ts";
 
 const token = "0123456789abcdef";
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
 const initialize = (name: string) =>
   JSON.stringify({
     jsonrpc: "2.0",
@@ -398,10 +406,36 @@ test("R8: JEVPILOT_MAX_SESSIONS limits browser sessions, not the HTTP clients th
 test("O4: creating more MCP sessions than the configured maximum is refused with 503", async () => {
   const server = await running(fakeMcpDeps(), {}, { maxSessions: 2, sessionIdleMs: 60_000 });
   const port = server.http.port;
+  const streams: ReturnType<typeof request>[] = [];
   try {
     const first = await send(port, { body: initialize("one") });
     const second = await send(port, { body: initialize("two") });
     assert.ok(first.headers["mcp-session-id"] && second.headers["mcp-session-id"]);
+    for (const response of [first, second]) {
+      await new Promise<void>((resolve, reject) => {
+        const stream = request(
+          {
+            host: "127.0.0.1",
+            port,
+            path: "/mcp",
+            method: "GET",
+            headers: {
+              authorization: `Bearer ${token}`,
+              accept: "text/event-stream",
+              "mcp-session-id": String(response.headers["mcp-session-id"]),
+            },
+          },
+          (res) => {
+            res.resume();
+            assert.equal(res.statusCode, 200);
+            resolve();
+          },
+        );
+        streams.push(stream);
+        stream.on("error", reject);
+        stream.end();
+      });
+    }
     const third = await send(port, { body: initialize("three") });
     assert.equal(third.status, 503);
     // Known sessions keep working and the counter frees after a DELETE.
@@ -422,7 +456,191 @@ test("O4: creating more MCP sessions than the configured maximum is refused with
     const fourth = await send(port, { body: initialize("four") });
     assert.equal(fourth.status, 200, "the freed slot is reusable");
   } finally {
+    for (const stream of streams) stream.destroy();
     await server.close();
+  }
+});
+
+test("R9: a full HTTP server closes the least recently used idle MCP session to admit a new client", async () => {
+  const app = createServer(fakeMcpDeps());
+  const created: ReturnType<typeof app.createMcpServer>[] = [];
+  const http = await startHttpServer(
+    { host: "127.0.0.1", port: 0, token, allowedHosts: [], allowedOrigins: [] },
+    () => {
+      const server = app.createMcpServer();
+      created.push(server);
+      return server;
+    },
+    { maxSessions: 2, sessionIdleMs: 60_000 },
+  );
+  const clients: Client[] = [];
+  try {
+    const first = await connect(http.port);
+    clients.push(first);
+    const firstId = (first.transport as StreamableHTTPClientTransport).sessionId;
+    assert.ok(firstId);
+    await first.close();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const second = await connect(http.port);
+    clients.push(second);
+    const secondId = (second.transport as StreamableHTTPClientTransport).sessionId;
+    assert.ok(secondId);
+    await second.close();
+    const third = await connect(http.port);
+    try {
+      assert.equal(
+        (await third.listTools()).tools.some((tool) => tool.name === "browser_run"),
+        true,
+      );
+      assert.equal(created[0]?.isConnected(), false, "the evicted transport was closed");
+      assert.equal(created[1]?.isConnected(), true);
+      const response = await send(http.port, {
+        headers: { "mcp-session-id": firstId },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/list" }),
+      });
+      assert.equal(response.status, 404);
+      assert.equal(
+        (
+          await send(http.port, {
+            headers: { "mcp-session-id": secondId },
+            body: JSON.stringify({ jsonrpc: "2.0", id: 8, method: "tools/list" }),
+          })
+        ).status,
+        200,
+        "the more recently touched idle session survives",
+      );
+    } finally {
+      await third.close().catch(() => {});
+    }
+  } finally {
+    for (const client of clients) await client.close().catch(() => {});
+    await http.close();
+    await app.close();
+  }
+});
+
+test("R9: concurrent initializations cannot exceed the HTTP session cap", async () => {
+  const gate = deferred();
+  const entered = deferred();
+  const app = createServer(fakeMcpDeps());
+  let created = 0;
+  const http = await startHttpServer(
+    { host: "127.0.0.1", port: 0, token, allowedHosts: [], allowedOrigins: [] },
+    () => {
+      created++;
+      const server = app.createMcpServer();
+      const original = server.connect.bind(server);
+      server.connect = async (transport) => {
+        if (created === 2) entered.resolve();
+        await gate.promise;
+        await original(transport);
+      };
+      return server;
+    },
+    { maxSessions: 2 },
+  );
+  const clients = [
+    new Client({ name: "r9-one", version: "1" }),
+    new Client({ name: "r9-two", version: "1" }),
+  ];
+  const rejected = new Client({ name: "r9-three", version: "1" });
+  const transport = () =>
+    new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${http.port}/mcp`), {
+      requestInit: { headers: { authorization: `Bearer ${token}` } },
+    });
+  const connections = clients.map((client) => client.connect(transport() as never));
+  try {
+    await entered.promise;
+    let rejectedStatus = 0;
+    const refusedTransport = new StreamableHTTPClientTransport(
+      new URL(`http://127.0.0.1:${http.port}/mcp`),
+      {
+        requestInit: { headers: { authorization: `Bearer ${token}` } },
+        fetch: async (url, init) => {
+          const response = await fetch(url, init);
+          rejectedStatus = response.status;
+          return response;
+        },
+      },
+    );
+    await assert.rejects(
+      rejected.connect(refusedTransport as never, { timeout: 1000 }),
+      /Too many MCP sessions/u,
+    );
+    assert.equal(rejectedStatus, 503);
+    assert.equal(created, 2, "connecting transports count against the cap");
+    gate.resolve();
+    await Promise.all(connections);
+    for (const client of clients)
+      assert.ok((await client.listTools()).tools.some((tool) => tool.name === "browser_run"));
+  } finally {
+    gate.resolve();
+    await Promise.allSettled(connections);
+    for (const client of [...clients, rejected]) await client.close().catch(() => {});
+    await http.close();
+    await app.close();
+  }
+});
+
+test("R9: a request that finishes after DELETE does not bring its closed session back", async () => {
+  const gate = deferred();
+  const handled = deferred();
+  const app = createServer(fakeMcpDeps());
+  const http = await startHttpServer(
+    { host: "127.0.0.1", port: 0, token, allowedHosts: [], allowedOrigins: [] },
+    () => {
+      const server = app.createMcpServer();
+      const original = server.connect.bind(server);
+      server.connect = async (transport) => {
+        await original(transport);
+        const httpTransport = transport as StreamableHTTPServerTransport;
+        const handleRequest = httpTransport.handleRequest.bind(httpTransport);
+        httpTransport.handleRequest = async (req, res, body) => {
+          await handleRequest(req, res, body);
+          if ((body as { method?: string } | undefined)?.method === "tools/list") {
+            handled.resolve();
+            await gate.promise;
+          }
+        };
+      };
+      return server;
+    },
+    { maxSessions: 1 },
+  );
+  const client = await connect(http.port);
+  try {
+    const transport = client.transport as StreamableHTTPClientTransport;
+    const id = transport.sessionId;
+    assert.ok(id);
+    assert.ok((await client.listTools()).tools.some((tool) => tool.name === "browser_run"));
+    await handled.promise;
+    assert.equal(
+      (await send(http.port, { method: "DELETE", headers: { "mcp-session-id": id } })).status,
+      200,
+    );
+    gate.resolve();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(
+      (
+        await send(http.port, {
+          headers: { "mcp-session-id": id },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 8, method: "tools/list" }),
+        })
+      ).status,
+      404,
+      "the closed entry was not re-registered",
+    );
+    const replacement = await connect(http.port);
+    try {
+      assert.ok((await replacement.listTools()).tools.some((tool) => tool.name === "browser_run"));
+    } finally {
+      await replacement.close();
+    }
+  } finally {
+    gate.resolve();
+    await client.close().catch(() => {});
+    await http.close();
+    await app.close();
   }
 });
 

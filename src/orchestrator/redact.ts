@@ -1,6 +1,6 @@
 const REDACTED = "[REDACTED]";
 // Text the observer cuts short (values at 60 characters, names at 80, page text at a budget) can show only
-// the start of a secret, so a run of this many leading characters is redacted as well.
+// the start of a secret. A prefix counts only immediately before the observer's cut marker.
 const PARTIAL_PREFIX = 8;
 
 type Piece = { char: string; start: number; end: number };
@@ -64,7 +64,7 @@ const same = (piece: Piece, wanted: string): boolean =>
 
 // Redacts a secret and the forms a page or the browser echoes it in: percent-encoded (as in a URL that
 // carries a submitted form), form-encoded, with whitespace collapsed, or cut off after its first characters.
-export function redactSecret(text: string, secret: string): string {
+export function redactSecret(text: string, secret: string, partial = true): string {
   if (!secret) return text;
   let clean = text.replaceAll(secret, REDACTED);
   const wanted = Array.from(secret.replace(/\s+/gu, " ").trim());
@@ -80,12 +80,31 @@ export function redactSecret(text: string, secret: string): string {
       same(source[index + run]!, wanted[run]!)
     )
       run++;
-    if (run >= minimum) {
-      spans.push([source[index]!.start, source[index + run - 1]!.end]);
+    let end = run > 0 ? source[index + run - 1]!.end : 0;
+    const next = source[index + run];
+    let cut = next?.char === "…";
+    // A URL can be cut partway through the next percent-encoded character.
+    if (partial && run >= minimum && run < wanted.length && next?.char === "%") {
+      const encoded = encodeURIComponent(wanted[run]!);
+      const tail = clean.slice(next.start, next.start + encoded.length + 1);
+      const marker = tail.indexOf("…");
+      if (marker > 0 && encoded.toLowerCase().startsWith(tail.slice(0, marker).toLowerCase())) {
+        cut = true;
+        end = next.start + marker;
+      }
+    }
+    if (run === wanted.length || (partial && run >= minimum && cut)) {
+      spans.push([source[index]!.start, end]);
       index += run;
+      while (source[index] && source[index]!.start < end) index++;
     } else index++;
   }
-  for (const [start, end] of spans.reverse())
-    clean = `${clean.slice(0, start)}${REDACTED}${clean.slice(end)}`;
-  return clean;
+  const output: string[] = [];
+  let endOfPrevious = 0;
+  for (const [start, end] of spans) {
+    output.push(clean.slice(endOfPrevious, start), REDACTED);
+    endOfPrevious = end;
+  }
+  output.push(clean.slice(endOfPrevious));
+  return output.join("");
 }

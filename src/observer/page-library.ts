@@ -33,8 +33,13 @@ export function installObserverLibrary(): void {
     __jevpilotObserverLibrary?: ObserverPageLibrary;
   };
   if (global.__jevpilotObserverLibrary) return;
-  const clean = (value: string | null | undefined, limit = 80): string =>
-    (value ?? "").replace(/\s+/gu, " ").trim().slice(0, limit);
+  const clean = (value: string | null | undefined, limit = 80): string => {
+    const text = (value ?? "").replace(/\s+/gu, " ").trim();
+    if (text.length <= limit) return text;
+    if (limit <= 0) return "";
+    const prefix = text.slice(0, limit - 1);
+    return prefix.endsWith("…") ? prefix : `${prefix}…`;
+  };
   const rectOf = (element: Element, offsetX = 0, offsetY = 0) => {
     const rect = element.getBoundingClientRect();
     return { x: rect.x + offsetX, y: rect.y + offsetY, width: rect.width, height: rect.height };

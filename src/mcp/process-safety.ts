@@ -24,7 +24,7 @@ export function installProcessSafety(stop: () => Promise<void>): void {
     process.exitCode = 1;
     void stop().catch(() => {});
     // If graceful shutdown hangs (a stuck browser or transport), exit anyway.
-    const forceExit = setTimeout(() => process.exit(1), 10_000);
+    const forceExit = setTimeout(() => process.exit(1), 30_000);
     forceExit.unref?.();
   });
 }

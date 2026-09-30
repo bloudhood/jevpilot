@@ -12,7 +12,12 @@ import {
   shortenHref,
   tokenize,
 } from "../../src/observer/observe.ts";
-import { pageSnapshot, resolveRef, resolveRefInPage } from "../../src/observer/page-snapshot.ts";
+import {
+  formSubmitNamesInPage,
+  pageSnapshot,
+  resolveRef,
+  resolveRefInPage,
+} from "../../src/observer/page-snapshot.ts";
 import { installObserverLibrary } from "../../src/observer/page-library.ts";
 import type { Observation, ObservedElement } from "../../src/observer/types.ts";
 import { FakePageHandle } from "../support/fake-engine.ts";
@@ -996,6 +1001,60 @@ describe("in-page source", () => {
     assert.equal(codeAfter.valueLength, undefined);
     assert.doesNotMatch(JSON.stringify({ codeBefore, codeAfter }), /111111|222222/u);
   });
+});
+
+test("R9: observer and formatter cuts retain a cut marker within their budgets", () => {
+  const text = "abcdefghij".repeat(1000);
+  const field = fakeDomElement("input", { type: "text", "aria-label": text });
+  field.value = text;
+  const snapshot = snapshotInFakePage([field]);
+  assert.equal(snapshot.elements[0]?.name, `${text.slice(0, 79)}…`);
+  assert.equal(snapshot.elements[0]?.value, `${text.slice(0, 59)}…`);
+  for (const goal of ["", "abcdefghij"]) {
+    const selected = selectPageText(text, goal, 500);
+    assert.ok(selected.length <= 500);
+    assert.ok(selected.endsWith("…"));
+  }
+  const state = observation([]);
+  state.text = text;
+  const formatted = formatObservation(state, { maxTokens: 200 });
+  assert.ok(formatted.endsWith("…"));
+  assert.ok(estimateTokens(formatted) <= 200);
+  const href = `mailto:${"a".repeat(53)}`;
+  assert.equal(href.length, 60);
+  assert.equal(shortenHref(href, state.url), href);
+});
+
+test("R9: the page query names only the current field's form-owner submit controls", () => {
+  const controls = [
+    fakeDomElement("button", { type: "submit" }, "Place order"),
+    fakeDomElement("button", { type: "" }, "Default submit"),
+    fakeDomElement("input", { type: "submit", "aria-label": "Pay" }),
+    fakeDomElement("input", { type: "image", alt: "Confirm payment" }),
+    fakeDomElement("button", { type: "button" }, "Delete account"),
+    fakeDomElement("input", { type: "text", "aria-label": "Quantity" }),
+  ];
+  const field = fakeDomElement("input", {});
+  field.form = { elements: controls };
+  const context = {
+    __jevpilotObserverRegistry: { epoch: 3, refs: new Map([["e1", new WeakRef(field)]]) },
+    getComputedStyle: () => ({ display: "block", visibility: "visible" }),
+  };
+  runInNewContext(`(${installObserverLibrary.toString()})()`, context);
+  const names = runInNewContext(
+    `(${formSubmitNamesInPage.toString()})`,
+    context,
+  ) as typeof formSubmitNamesInPage;
+  assert.deepEqual(Array.from(names(3, "e1")), [
+    "Place order",
+    "Default submit",
+    "Pay",
+    "Confirm payment",
+  ]);
+  assert.deepEqual(Array.from(names(2, "e1")), []);
+  assert.deepEqual(Array.from(names(3, "missing")), []);
+  field.isConnected = false;
+  assert.deepEqual(Array.from(names(3, "e1")), []);
 });
 
 test("R7: a link target written with line breaks cannot add lines to the observation", () => {

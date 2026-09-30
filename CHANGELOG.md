@@ -2,21 +2,21 @@
 
 This project follows Keep a Changelog. Versions use Semantic Versioning.
 
-## [Unreleased]
+## [0.2.0] - 2026-09-30
 
-Fixes from a second code review, aimed at irreversible-action approval, secrets, the network guard and session state.
+Fixes from a second code review and a review of those fixes, aimed at irreversible-action approval, secrets, the network guard, session state and the HTTP transport. Two configuration changes can stop an existing setup from starting: `JEVPILOT_HTTP_ALLOWED_HOSTS` on a non-loopback HTTP bind, and `JEVPILOT_BLOCKED_ADDRESSES` entries with host bits set.
 
 ### Security
 
-- Pressing Enter or Space (also in a chord such as Control+Enter) on a focused button or link that matches an irreversible action now waits for approval, whether or not the control is in a form and also for `type="button"` controls. Typing with `submit` into a form whose submit button is irreversible waits like Enter does, and elements the observer labels `clickable` (divs used as buttons) are matched like links.
+- Pressing Enter or Space (also in a chord such as Control+Enter) on a focused button or link that matches an irreversible action now waits for approval, whether or not the control is in a form and also for `type="button"` controls. Typing with `submit` into a form whose submit button is irreversible waits like Enter does, and elements the observer labels `clickable` (divs used as buttons) are matched like links. An approved key press is sent to the approved control even when focus moved in between, and a form's submit controls are checked even when they are outside the observation (for example a Place order button far below the viewport).
 - An approval is tied to the page it was raised on: `allow_irreversible` on `browser_resume` no longer runs a stored action on a different page.
-- Secret redaction also covers a resolved secret that a page or URL echoes percent-encoded, form-encoded, with whitespace collapsed, or cut off after its first 8 or more characters, in results and in decision requests.
-- The network guard no longer skips a host it could not resolve: when the browser resolves names itself, a lookup timeout or resolver failure (other than a missing name) fails the document, popup or download instead of letting it through. Adds the Azure WireServer address to the metadata list.
+- Secret redaction also covers a resolved secret that a page or URL echoes percent-encoded, form-encoded or with whitespace collapsed, and one the observer cut short after its first 8 or more characters (text it cuts now ends with "…"), in results and in decision requests. A password that starts with an ordinary word no longer rewrites labels or the field type, and when one secret extends another the longer one is redacted first.
+- In `private` mode the network guard no longer skips a host it could not resolve: when the browser resolves names itself, a lookup timeout or resolver failure (other than a missing name) fails the document, popup or download. The default `metadata` mode still loads such a host, because the browser may reach it through a system or environment proxy the guard cannot see. Adds the Azure WireServer address to the metadata list.
 - Link targets that are not web addresses and form ids chosen by the page can no longer add lines or unquoted text to the questions sent to Jev.
 - Token counts in a decision response must be finite and not negative, so they cannot lower the decision budget.
 - The HTTP transport refuses to start on a non-loopback bind (including `0.0.0.0`) unless `JEVPILOT_HTTP_ALLOWED_HOSTS` lists the accepted `Host` values, so a network-facing endpoint no longer relies on the token alone against DNS rebinding. The Docker example in the configuration guide sets it.
 - In `private` mode the network guard also blocks 6to4 (`2002::/16`), IPv4-compatible (`::/96`) and RFC 8215 NAT64 (`64:ff9b:1::/48`) addresses, which can embed a private IPv4 address.
-- The network guard resolves a host the way the browser does when `JEVPILOT_EXTRA_ARGS` contains `--host-resolver-rules` (`MAP` and `EXCLUDE`, with `*` and `?` patterns, first match wins), so a mapped name is checked against the address it is mapped to instead of what DNS says about the original name.
+- The network guard resolves a host the way the browser does when the browser flags contain `--host-resolver-rules` (`MAP` and `EXCLUDE`, with `*` and `?` patterns, first match wins), so a mapped name is checked against the address it is mapped to instead of what DNS says about the original name. Rules with spaces belong in a profile file's `extraArgs`; `JEVPILOT_EXTRA_ARGS` splits on whitespace.
 
 ### Added
 
@@ -26,7 +26,8 @@ Fixes from a second code review, aimed at irreversible-action approval, secrets,
 ### Changed
 
 - `JEVPILOT_BLOCKED_ADDRESSES` entries whose host bits are set (for example `10.0.0.1/8`) are refused at startup; write `10.0.0.0/8`.
-- The HTTP transport accepts at most 64 MCP client sessions and answers further new sessions with 503. This is separate from `JEVPILOT_MAX_SESSIONS`, which limits browser sessions.
+- The HTTP transport keeps at most 64 MCP client sessions. When it is full, a new client replaces the least recently used idle session; it gets 503 only when every session has a request in flight. This is separate from `JEVPILOT_MAX_SESSIONS`, which limits browser sessions.
+- CI builds the runtime image and checks that it serves the MCP tools over stdio.
 
 ### Fixed
 
@@ -37,7 +38,11 @@ Fixes from a second code review, aimed at irreversible-action approval, secrets,
 - A refused second launch of a browser profile no longer releases the profile of the browser that is using it.
 - Two tests nested inside other tests (policy thresholds, observer shadow-root and delayed content) never ran; they run now.
 - Stopping the HTTP server no longer waits forever for open event streams, closing an idle MCP session cannot raise an unhandled rejection, and a socket error after startup is logged instead of crashing the process.
-- After an uncaught exception the process exits within 10 seconds even when a graceful shutdown hangs.
+- After an uncaught exception the process exits within 30 seconds even when a graceful shutdown hangs.
+- A `browser_run` the client cancelled, or whose browser disconnected during the initial navigation, no longer leaves a session behind that holds a place in `JEVPILOT_MAX_SESSIONS`.
+- A request that ends after its MCP session was deleted or replaced no longer puts the closed session back.
+- A rejected download in an isolated session is cancelled in its own browser context; it used to keep downloading.
+- Only the decision circuit breaker's half-open probe clears its probe state, so an older failing request cannot let a second probe through.
 - `jevpilot-mcp doctor` also hides the values of any environment variable named like a key, token, secret or password, and reports a browser-profile cleanup failure as `browser-profile` instead of `temp`.
 - The refusal of `JEVPILOT_EXTRA_ARGS` names the rejected flag, an invalid browser profile no longer leaves its temporary directory behind, and an invalid `JEVPILOT_THRESHOLDS` is reported as a startup message instead of a stack trace.
 - Error messages that hide `password=...` and similar pairs keep the key name instead of printing a literal `$1`, and a failing browser close is logged without raw error text.

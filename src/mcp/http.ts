@@ -61,10 +61,15 @@ export function startHttpServer(
   createMcpServer: () => McpServer,
   options: { sessionIdleMs?: number; maxSessions?: number } = {},
 ): Promise<{ server: Server; close: () => Promise<void>; port: number }> {
-  const sessions = new Map<
-    string,
-    { transport: StreamableHTTPServerTransport; server: McpServer; touched: number }
-  >();
+  type HttpSession = {
+    transport: StreamableHTTPServerTransport;
+    server: McpServer;
+    touched: number;
+    inFlight: number;
+    open: boolean;
+  };
+  const sessions = new Map<string, HttpSession>();
+  let initializing = 0;
   const sessionIdleMs = options.sessionIdleMs ?? 30 * 60 * 1000;
   const maxSessions = options.maxSessions ?? 64;
   const idleTimer = setInterval(
@@ -72,6 +77,7 @@ export function startHttpServer(
       const cutoff = Date.now() - sessionIdleMs;
       for (const [id, entry] of sessions)
         if (entry.touched < cutoff) {
+          entry.open = false;
           void entry.transport.close().catch(() => {});
           sessions.delete(id);
         }
@@ -129,6 +135,7 @@ export function startHttpServer(
         reject(res, 404, "Unknown session");
         return;
       }
+      entry.open = false;
       await entry.transport.close();
       sessions.delete(id!);
       res.writeHead(200);
@@ -140,52 +147,82 @@ export function startHttpServer(
       reject(res, 404, "Unknown session");
       return;
     }
-    let body: unknown;
-    if (req.method === "POST") {
-      const chunks: Buffer[] = [];
-      let size = 0;
-      for await (const chunk of req) {
-        size += Buffer.byteLength(chunk);
-        if (size > 4 * 1024 * 1024) {
-          reject(res, 413, "Payload too large");
-          req.resume();
-          return;
-        }
-        chunks.push(Buffer.from(chunk));
-      }
-      if (chunks.length) {
-        try {
-          body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-        } catch {
-          reject(res, 400, "Invalid JSON");
-          return;
-        }
-      }
+    const createdByRequest = !entry;
+    let reserved = false;
+    if (entry) {
+      entry.touched = Date.now();
+      entry.inFlight++;
     }
-    if (!entry) {
-      if (sessions.size >= maxSessions) {
-        reject(res, 503, "Too many MCP sessions; retry after older sessions idle out");
+    try {
+      let body: unknown;
+      if (req.method === "POST") {
+        const chunks: Buffer[] = [];
+        let size = 0;
+        for await (const chunk of req) {
+          size += Buffer.byteLength(chunk);
+          if (size > 4 * 1024 * 1024) {
+            reject(res, 413, "Payload too large");
+            req.resume();
+            return;
+          }
+          chunks.push(Buffer.from(chunk));
+        }
+        if (chunks.length) {
+          try {
+            body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+          } catch {
+            reject(res, 400, "Invalid JSON");
+            return;
+          }
+        }
+      }
+      if (!entry) {
+        let evicted: HttpSession | undefined;
+        if (sessions.size + initializing >= maxSessions) {
+          const candidate = [...sessions.entries()]
+            .filter(([, item]) => item.open && item.inFlight === 0)
+            .sort(([, left], [, right]) => left.touched - right.touched)[0];
+          if (!candidate) {
+            reject(res, 503, "Too many MCP sessions; retry after older sessions idle out");
+            return;
+          }
+          const [candidateId, candidateEntry] = candidate;
+          candidateEntry.open = false;
+          sessions.delete(candidateId);
+          evicted = candidateEntry;
+        }
+        initializing++;
+        reserved = true;
+        if (evicted) await evicted.transport.close().catch(() => {});
+        const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: randomUUID });
+        const server = createMcpServer();
+        const createdEntry = { transport, server, touched: Date.now(), inFlight: 1, open: true };
+        entry = createdEntry;
+        transport.onclose = () => {
+          createdEntry.open = false;
+          if (transport.sessionId && sessions.get(transport.sessionId) === createdEntry)
+            sessions.delete(transport.sessionId);
+        };
+        await server.connect(transport as never);
+      }
+      if (!entry.open) {
+        reject(res, 404, "Unknown session");
         return;
       }
-      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: randomUUID });
-      const server = createMcpServer();
-      entry = { transport, server, touched: Date.now() };
-      transport.onclose = () => {
-        if (transport.sessionId) sessions.delete(transport.sessionId);
-      };
-      try {
-        await server.connect(transport as never);
-      } catch (error) {
-        await transport.close().catch(() => {});
-        throw error;
-      }
-    }
-    entry.touched = Date.now();
-    try {
       await entry.transport.handleRequest(req, res, body);
     } finally {
-      if (entry.transport.sessionId) sessions.set(entry.transport.sessionId, entry);
-      else await entry.transport.close().catch(() => {});
+      if (reserved) initializing--;
+      if (entry) {
+        entry.inFlight--;
+        if (
+          entry.transport.sessionId &&
+          entry.open &&
+          (createdByRequest || sessions.get(entry.transport.sessionId) === entry)
+        )
+          sessions.set(entry.transport.sessionId, entry);
+        else if (!entry.transport.sessionId && entry.open)
+          await entry.transport.close().catch(() => {});
+      }
     }
   };
   httpServer = createServer((req, res) => {
@@ -196,6 +233,7 @@ export function startHttpServer(
   const close = async () => {
     clearInterval(idleTimer);
     for (const entry of sessions.values()) {
+      entry.open = false;
       await entry.transport.close().catch(() => {});
       await entry.server.close().catch(() => {});
     }

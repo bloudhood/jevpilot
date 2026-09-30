@@ -24,6 +24,7 @@ export const actionOutcomes = [
   "select-failed",
   "dialog-opened",
   "value-not-set",
+  "not-focusable",
 ] as const;
 export type ActionOutcome = (typeof actionOutcomes)[number];
 export type ActionResult = {

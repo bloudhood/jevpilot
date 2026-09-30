@@ -383,10 +383,12 @@ class CdpPageHandle implements PageHandle {
         void (async () => {
           const verdict = await checkUrl(event.request.url, this.networkGuard, this.lookup);
           const address = verdict.blocked;
-          // A host that could not be resolved for the check is not loaded when the browser resolves it
-          // itself, so a slow or failing lookup cannot be used to skip the check. Behind a proxy the proxy
-          // resolves the name and this lookup says nothing about it, so the page load goes on.
-          const unverified = verdict.unverified === true && this.checkResponseAddress;
+          // Private mode does not load a host its lookup could not verify when the browser resolves names
+          // itself. Behind a configured proxy the proxy resolves them and this lookup says nothing either way.
+          const unverified =
+            verdict.unverified === true &&
+            this.networkGuard.mode === "private" &&
+            this.checkResponseAddress;
           const method = address || unverified ? "Fetch.failRequest" : "Fetch.continueRequest";
           try {
             await this.browser.client.call(
@@ -1225,7 +1227,10 @@ export function createCdpDriver(deps: LaunchDeps & { lookup?: AddressLookup } = 
       const rejected = async (url: string): Promise<string | undefined> => {
         const verdict = await checkUrl(url, networkGuard, effectiveLookup);
         return (
-          verdict.blocked ?? (verdict.unverified && checkResponseAddress ? "unverified" : undefined)
+          verdict.blocked ??
+          (verdict.unverified && networkGuard.mode === "private" && checkResponseAddress
+            ? "unverified"
+            : undefined)
         );
       };
       const browser = await launchBrowser(profile, options, deps);
@@ -1365,10 +1370,14 @@ export function createCdpDriver(deps: LaunchDeps & { lookup?: AddressLookup } = 
         };
         const page = [...pages.values()].find((candidate) => candidate.ownsFrame(event.frameId));
         if (!page) return;
+        const browserContextId = contexts.get(page.id);
         void (async () => {
           if (await rejected(event.url)) {
             await browser.client
-              .call("Browser.cancelDownload", { guid: event.guid })
+              .call("Browser.cancelDownload", {
+                guid: event.guid,
+                ...(browserContextId ? { browserContextId } : {}),
+              })
               .catch(() => {});
             return;
           }

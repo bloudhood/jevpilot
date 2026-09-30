@@ -1111,3 +1111,146 @@ test("R5: a session whose tab cannot be closed is still released", async () => {
     await app.close();
   }
 });
+
+function slowNavigation() {
+  const deps = fakeMcpDeps();
+  deps.maxSessions = 1;
+  const deferred = () => {
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => {
+      resolve = done;
+    });
+    return { promise, resolve };
+  };
+  const started = deferred();
+  const finish = deferred();
+  const closed = deferred();
+  let disconnect = () => {};
+  deps.engines = new EngineRegistry({ default: { driver: "slow-navigation", profile: {} } });
+  deps.engines.register({
+    kind: "slow-navigation",
+    async launch() {
+      let connected = true;
+      const listeners = new Set<() => void>();
+      disconnect = () => {
+        connected = false;
+        for (const listener of listeners) listener();
+      };
+      return {
+        engine: { name: "slow-navigation", driver: "slow-navigation", stealthLevel: "high" },
+        capabilities: new FakePageHandle().capabilities,
+        selfCheck: undefined,
+        get connected() {
+          return connected;
+        },
+        onDisconnected(listener) {
+          listeners.add(listener);
+          return () => listeners.delete(listener);
+        },
+        newPage: async () => {
+          const page = new FakePageHandle();
+          if (!deps.pages.length) {
+            page.navigate = async (url) => {
+              started.resolve();
+              await finish.promise;
+              return { url, status: 200, headers: {} };
+            };
+            page.close = async () => {
+              closed.resolve();
+            };
+          }
+          deps.pages.push(page);
+          return page;
+        },
+        pages: () => deps.pages,
+        close: async () => {},
+      };
+    },
+  });
+  return { deps, started, finish, closed, disconnect: () => disconnect() };
+}
+
+test(
+  "R9: a browser_run cancelled by the client does not keep a session",
+  { timeout: 20_000 },
+  async () => {
+    const setup = slowNavigation();
+    const app = createServer(setup.deps);
+    const client = new Client({ name: "r9-cancel", version: "1" });
+    const [left, right] = InMemoryTransport.createLinkedPair();
+    await app.server.connect(right);
+    await client.connect(left);
+    const controller = new AbortController();
+    try {
+      const pending = client.callTool(
+        {
+          name: "browser_run",
+          arguments: { goal: "Finish", url: "http://fixture.test/start" },
+        },
+        undefined,
+        { signal: controller.signal },
+      );
+      const cancelled = assert.rejects(pending, /cancelled by test/u);
+      await setup.started.promise;
+      controller.abort(new Error("cancelled by test"));
+      await cancelled;
+      await setup.closed.promise;
+      // The cancelled navigation is still pending: cleanup cannot depend on its completion.
+      const second = data(
+        await client.callTool({ name: "browser_run", arguments: { goal: "Finish again" } }),
+      );
+      assert.notEqual(second.reason, "too_many_sessions");
+      assert.equal(second.status, "NEEDS_VALUES");
+      assert.equal(setup.deps.pages.length, 2);
+      const observed = data(
+        await client.callTool({ name: "browser_observe", arguments: { session: second.session } }),
+      );
+      assert.equal(observed.status, "RUNNING");
+    } finally {
+      setup.finish.resolve();
+      await client.close();
+      await app.close();
+    }
+  },
+);
+
+test(
+  "R9: a browser_run whose browser disconnected during navigation does not register a session",
+  { timeout: 20_000 },
+  async () => {
+    const setup = slowNavigation();
+    const app = createServer(setup.deps);
+    const client = new Client({ name: "r9-disconnected-navigation", version: "1" });
+    const [left, right] = InMemoryTransport.createLinkedPair();
+    await app.server.connect(right);
+    await client.connect(left);
+    try {
+      const pending = client.callTool({
+        name: "browser_run",
+        arguments: { goal: "Finish", url: "http://fixture.test/start" },
+      });
+      await setup.started.promise;
+      setup.disconnect();
+      const first = data(await pending);
+      await setup.closed.promise;
+      assert.equal(first.status, "FAILED");
+      assert.equal(first.reason, "browser_disconnected");
+      assert.ok(first.session);
+      const missing = await client.callTool({
+        name: "browser_observe",
+        arguments: { session: first.session },
+      });
+      assert.equal(missing.isError, true);
+      assert.match(text(missing), /Unknown session/u);
+      const second = data(
+        await client.callTool({ name: "browser_run", arguments: { goal: "Finish again" } }),
+      );
+      assert.notEqual(second.reason, "too_many_sessions");
+      assert.equal(second.status, "NEEDS_VALUES");
+    } finally {
+      setup.finish.resolve();
+      await client.close();
+      await app.close();
+    }
+  },
+);

@@ -4,6 +4,7 @@ import { installObserverLibrary } from "./page-library.ts";
 import { FrameGoneError, PageUnresponsiveError } from "../engine/types.ts";
 import { mapFrameRect } from "./frame-geometry.ts";
 import type { MarkerGeometry, Observation, ObservedElement, ObserveOptions } from "./types.ts";
+import { truncateText } from "./format.ts";
 export { formatObservation, shortenHref } from "./format.ts";
 
 function mapChildGeometry<T extends MarkerGeometry>(
@@ -49,7 +50,7 @@ export function selectPageText(text: string, goal: string, budget: number): stri
   if (normalized.length <= budget) return normalized.replace(/\s*\n\s*/gu, " ");
   const prefix = normalized.slice(0, Math.min(400, budget)).trim();
   const terms = [...new Set(tokenize(goal))];
-  if (!terms.length || prefix.length >= budget) return prefix;
+  if (!terms.length || prefix.length >= budget) return truncateText(normalized, prefix.length);
   const sentences = [...normalized.matchAll(/[^.!?。！？\n]+[.!?。！？]?/gu)]
     .map((match) => ({ text: match[0]!.trim(), start: match.index }))
     .filter((sentence) => sentence.text && sentence.start >= prefix.length);
@@ -80,23 +81,24 @@ export function selectPageText(text: string, goal: string, budget: number): stri
     .filter((sentence) => sentence.score > 0)
     .sort((a, b) => b.score - a.score || a.start - b.start);
   const selected: typeof ranked = [];
-  let remaining = budget - prefix.length;
+  let remaining = budget - prefix.length - 1;
   for (const sentence of ranked) {
     if (remaining <= 1) break;
     const length = Math.min(sentence.text.length, remaining - 1);
     if (length <= 0) continue;
-    selected.push({ ...sentence, text: sentence.text.slice(0, length) });
+    selected.push({ ...sentence, text: truncateText(sentence.text, length) });
     remaining -= length + 1;
   }
   selected.sort((a, b) => a.start - b.start);
-  let output = prefix;
+  let output = prefix.endsWith("…") ? prefix : `${prefix}…`;
   let previousEnd = prefix.length;
   for (const sentence of selected) {
-    const gap = sentence.start > previousEnd ? "…" : " ";
+    const gap = sentence.start > previousEnd && !output.endsWith("…") ? "…" : " ";
     output += gap + sentence.text;
     previousEnd = sentence.start + sentence.text.length;
   }
-  return output.slice(0, budget);
+  if (previousEnd < normalized.length && !output.endsWith("…")) output += "…";
+  return truncateText(output, budget);
 }
 
 export function rankByGoal(elements: ObservedElement[], goal: string): ObservedElement[] {
