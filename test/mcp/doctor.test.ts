@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { createServer } from "node:http";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { runDoctor } from "../../src/mcp/doctor.ts";
 import type { BrowserHandle, EngineDriver, LaunchOptions } from "../../src/engine/types.ts";
@@ -226,4 +229,53 @@ test("R2: doctor fails the configuration check for an unsupported engine", async
   assert.equal(result.checks.find((check) => check.name === "config")?.status, "fail");
   assert.match(result.checks.find((check) => check.name === "config")?.detail ?? "", /CDP driver/u);
   assert.equal(result.ok, false);
+});
+
+test("R8: doctor finishes and reports when the decision service keeps failing with a retryable status", async () => {
+  // Run as its own process: with nothing else holding the event loop, a retry wait that does not keep the
+  // process alive lets doctor exit in the middle of the retry, printing nothing and returning 0.
+  const server = createServer((_request, response) => {
+    response.statusCode = 503;
+    response.end("{}");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("fixture server has no port");
+  try {
+    const result = await new Promise<{ code: number | null; stdout: string }>((resolve, reject) => {
+      const child = spawn(
+        process.execPath,
+        [
+          fileURLToPath(new URL("../../src/mcp/main.ts", import.meta.url)),
+          "doctor",
+          "--no-browser",
+          "--json",
+        ],
+        {
+          env: {
+            ...process.env,
+            JEV_PROVIDER: "custom",
+            JEV_API_KEY: "doctor-test-key-0123456789",
+            JEV_BASE_URL: `http://127.0.0.1:${address.port}/decide`,
+            JEV_MAX_RETRIES: "1",
+            JEVPILOT_DISPLAY: "headless",
+          },
+          stdio: ["ignore", "pipe", "ignore"],
+        },
+      );
+      let stdout = "";
+      child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
+      child.once("error", reject);
+      child.once("exit", (code) => resolve({ code, stdout }));
+    });
+    const report = JSON.parse(result.stdout) as {
+      ok: boolean;
+      checks: { name: string; status: string }[];
+    };
+    assert.equal(report.ok, false);
+    assert.equal(report.checks.find((check) => check.name === "decision")?.status, "fail");
+    assert.equal(result.code, 1);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
 });

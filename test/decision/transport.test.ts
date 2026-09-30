@@ -7,6 +7,7 @@ import {
   sendWithRetry,
 } from "../../src/index.ts";
 import type { FetchLike, TransportDeps } from "../../src/index.ts";
+import { defaultDeps } from "../../src/decision/transport.ts";
 import { fixture, jsonResponse } from "./helpers.ts";
 
 function deps(fetch: FetchLike, sleep: TransportDeps["sleep"] = async () => {}): TransportDeps {
@@ -355,5 +356,27 @@ describe("HTTP error details", () => {
     const transport = deps(async () => failed);
     await assert.rejects(send(transport), DecisionTransportError);
     assert.equal(failed.bodyUsed, true);
+  });
+});
+
+describe("default transport dependencies", () => {
+  test("R8: the default retry sleep keeps the process alive until it has finished", async () => {
+    // A retry waiting between attempts is work in progress: an unref'd timer lets a one-shot process
+    // (jevpilot-mcp doctor) exit in the middle of it, silently and with status 0.
+    const original = globalThis.setTimeout;
+    let created: NodeJS.Timeout | undefined;
+    globalThis.setTimeout = ((handler: () => void, delay?: number, ...rest: unknown[]) => {
+      const timer = original(handler, delay, ...rest) as unknown as NodeJS.Timeout;
+      if (delay === 7) created = timer;
+      return timer;
+    }) as typeof setTimeout;
+    try {
+      const pending = defaultDeps.sleep(7);
+      assert.ok(created, "the sleep starts a timer");
+      assert.equal(created.hasRef(), true);
+      await pending;
+    } finally {
+      globalThis.setTimeout = original;
+    }
   });
 });
