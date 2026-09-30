@@ -14,6 +14,19 @@ Fixes from a second code review, aimed at irreversible-action approval, secrets,
 - The network guard no longer skips a host it could not resolve: when the browser resolves names itself, a lookup timeout or resolver failure (other than a missing name) fails the document, popup or download instead of letting it through. Adds the Azure WireServer address to the metadata list.
 - Link targets that are not web addresses and form ids chosen by the page can no longer add lines or unquoted text to the questions sent to Jev.
 - Token counts in a decision response must be finite and not negative, so they cannot lower the decision budget.
+- The HTTP transport refuses to start on a non-loopback bind (including `0.0.0.0`) unless `JEVPILOT_HTTP_ALLOWED_HOSTS` lists the accepted `Host` values, so a network-facing endpoint no longer relies on the token alone against DNS rebinding. The Docker example in the configuration guide sets it.
+- In `private` mode the network guard also blocks 6to4 (`2002::/16`), IPv4-compatible (`::/96`) and RFC 8215 NAT64 (`64:ff9b:1::/48`) addresses, which can embed a private IPv4 address.
+- The network guard resolves a host the way the browser does when `JEVPILOT_EXTRA_ARGS` contains `--host-resolver-rules` (`MAP` and `EXCLUDE`, with `*` and `?` patterns, first match wins), so a mapped name is checked against the address it is mapped to instead of what DNS says about the original name.
+
+### Added
+
+- `JEV_BREAKER_THRESHOLD` and `JEV_BREAKER_COOLDOWN_MS` tune the decision circuit breaker (defaults unchanged: 3 failures, 30 s).
+- The runtime image has a health check that probes the HTTP endpoint when `JEVPILOT_TRANSPORT=http`.
+
+### Changed
+
+- `JEVPILOT_BLOCKED_ADDRESSES` entries whose host bits are set (for example `10.0.0.1/8`) are refused at startup; write `10.0.0.0/8`.
+- The HTTP transport accepts at most 64 MCP client sessions and answers further new sessions with 503. This is separate from `JEVPILOT_MAX_SESSIONS`, which limits browser sessions.
 
 ### Fixed
 
@@ -23,6 +36,13 @@ Fixes from a second code review, aimed at irreversible-action approval, secrets,
 - A dialog opened by a frame that goes away no longer blocks the page, and answering a dialog Chrome reports as no longer showing clears it instead of holding the session at the dialog handoff.
 - A refused second launch of a browser profile no longer releases the profile of the browser that is using it.
 - Two tests nested inside other tests (policy thresholds, observer shadow-root and delayed content) never ran; they run now.
+- Stopping the HTTP server no longer waits forever for open event streams, closing an idle MCP session cannot raise an unhandled rejection, and a socket error after startup is logged instead of crashing the process.
+- After an uncaught exception the process exits within 10 seconds even when a graceful shutdown hangs.
+- `jevpilot-mcp doctor` also hides the values of any environment variable named like a key, token, secret or password, and reports a browser-profile cleanup failure as `browser-profile` instead of `temp`.
+- The refusal of `JEVPILOT_EXTRA_ARGS` names the rejected flag, an invalid browser profile no longer leaves its temporary directory behind, and an invalid `JEVPILOT_THRESHOLDS` is reported as a startup message instead of a stack trace.
+- Error messages that hide `password=...` and similar pairs keep the key name instead of printing a literal `$1`, and a failing browser close is logged without raw error text.
+- A handoff screenshot directory is no longer left registered when its session closes while the directory is being created.
+- The MCP server reports the version from `package.json` instead of a hardcoded `0.1.0`.
 
 ## [0.1.1] - 2026-09-29
 

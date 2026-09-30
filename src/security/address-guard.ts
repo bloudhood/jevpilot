@@ -153,40 +153,70 @@ export async function blockedUrl(
   return (await checkUrl(url, guard, lookup)).blocked;
 }
 
-const resolverRule = /^MAP\s+(\S+)\s+(\S+)$/u;
+// Chrome's MatchPattern: `*` matches any run of characters (including none), `?` any single one.
+function matchesPattern(text: string, pattern: string): boolean {
+  let t = 0;
+  let p = 0;
+  let star = -1;
+  let mark = 0;
+  while (t < text.length) {
+    if (p < pattern.length && (pattern[p] === "?" || pattern[p] === text[t])) {
+      t++;
+      p++;
+    } else if (p < pattern.length && pattern[p] === "*") {
+      star = p++;
+      mark = t;
+    } else if (star !== -1) {
+      p = star + 1;
+      t = ++mark;
+    } else return false;
+  }
+  while (p < pattern.length && pattern[p] === "*") p++;
+  return p === pattern.length;
+}
+
+// A replacement is `HOST`, `HOST:PORT`, `[IPV6]` or `[IPV6]:PORT`; the port never changes what it resolves to.
+function replacementHost(value: string): string {
+  const bracketed = /^\[([^\]]+)\](?::\d+)?$/u.exec(value);
+  if (bracketed) return bracketed[1]!;
+  return /^[^:]+:\d+$/u.test(value) ? value.slice(0, value.lastIndexOf(":")) : value;
+}
 
 /**
- * Build an AddressLookup that mirrors Chrome's --host-resolver-rules MAP entries so the
- * guard resolves hosts exactly like the browser it protects (Chrome applies these rules
- * after DNS; a deployment using them desyncs guard and browser if the guard ignores them).
- * Mapped hostnames resolve to their mapped address without touching DNS. Unmapped
- * hostnames fall through to the underlying lookup.
+ * Build an AddressLookup that mirrors Chrome's --host-resolver-rules so the guard resolves hosts the way
+ * the browser it protects does (Chrome applies the rules instead of DNS; a deployment using them would
+ * otherwise have the guard check an address the browser never connects to). Like Chrome, the last switch
+ * wins, `EXCLUDE` patterns are checked first, then `MAP` rules in order with the first match applying once
+ * and `*`/`?` wildcards in the pattern. A replacement that is a name is resolved normally, not mapped again,
+ * and `~NOTFOUND` fails the lookup like a missing name. Hosts no rule covers use the underlying lookup.
  */
 export function lookupWithResolverRules(
   extraArgs: readonly string[] | undefined,
   fallback: AddressLookup = dnsLookup,
 ): AddressLookup {
-  const maps = new Map<string, string>();
-  for (const argument of extraArgs ?? []) {
-    if (!argument.startsWith("--host-resolver-rules")) continue;
-    const value = argument.slice(argument.indexOf("=") + 1);
-    for (const rule of value.split(",")) {
-      const match = resolverRule.exec(rule.trim());
-      if (match) maps.set(match[1]!.toLowerCase(), match[2]!);
-    }
+  const raw = (extraArgs ?? []).filter((argument) => argument.startsWith("--host-resolver-rules="));
+  const value = raw.at(-1)?.slice("--host-resolver-rules=".length);
+  if (value === undefined) return fallback;
+  const excluded: string[] = [];
+  const maps: { pattern: string; replacement: string }[] = [];
+  for (const rule of value.split(",")) {
+    const parts = rule.trim().split(/\s+/u);
+    const keyword = parts[0]?.toLowerCase();
+    if (keyword === "exclude" && parts.length === 2) excluded.push(parts[1]!.toLowerCase());
+    else if (keyword === "map" && parts.length === 3)
+      maps.push({ pattern: parts[1]!.toLowerCase(), replacement: parts[2]! });
   }
-  if (maps.size === 0) return fallback;
+  if (maps.length === 0) return fallback;
   return async (hostname, options) => {
-    const mapped = maps.get(hostname.toLowerCase());
-    if (mapped === undefined) return fallback(hostname, options);
-    // Chrome's mapping syntax is HOST[:PORT]; the port never affects the resolved address.
-    const address = mapped.replace(/:\d+$/u, "");
-    if (isIP(address)) return [{ address, family: isIP(address) }];
-    // A mapping to another hostname chains one level (Chrome resolves the replacement).
-    const chained = maps.get(address.toLowerCase());
-    const chainedAddress = chained?.replace(/:\d+$/u, "");
-    if (chainedAddress !== undefined && isIP(chainedAddress))
-      return [{ address: chainedAddress, family: isIP(chainedAddress) }];
-    return fallback(address, options);
+    const name = hostname.toLowerCase();
+    if (excluded.some((pattern) => matchesPattern(name, pattern)))
+      return fallback(hostname, options);
+    const rule = maps.find((candidate) => matchesPattern(name, candidate.pattern));
+    if (!rule) return fallback(hostname, options);
+    if (rule.replacement.toUpperCase() === "~NOTFOUND")
+      throw Object.assign(new Error("host mapped to ~NOTFOUND"), { code: "ENOTFOUND" });
+    const address = replacementHost(rule.replacement);
+    const family = isIP(address);
+    return family ? [{ address, family }] : fallback(address, options);
   };
 }

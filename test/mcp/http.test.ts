@@ -351,6 +351,50 @@ test("O4: jevpilot-mcp serves HTTP from the environment without stdin", async ()
   }
 });
 
+test("R8: JEVPILOT_MAX_SESSIONS limits browser sessions, not the HTTP clients that can connect", async () => {
+  const child = spawn(process.execPath, ["src/mcp/main.ts"], {
+    cwd: process.cwd(),
+    stdio: ["ignore", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      JEVPILOT_TRANSPORT: "http",
+      JEVPILOT_HTTP_PORT: "0",
+      JEVPILOT_HTTP_TOKEN: token,
+      JEVPILOT_MAX_SESSIONS: "1",
+    },
+  });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  const clients: Client[] = [];
+  try {
+    const port = await new Promise<number>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`no listening line: ${stderr}`)), 10000);
+      const check = () => {
+        const match = /listening on http:\/\/127\.0\.0\.1:(\d+)\/mcp/u.exec(stderr);
+        if (match) {
+          clearTimeout(timer);
+          resolve(Number(match[1]));
+        } else setTimeout(check, 10);
+      };
+      check();
+    });
+    // Three MCP clients against a server whose browser-session limit is 1: every one connects.
+    for (let index = 0; index < 3; index++) {
+      const client = await connect(port);
+      clients.push(client);
+      assert.ok((await client.listTools()).tools.some((tool) => tool.name === "browser_run"));
+    }
+  } finally {
+    for (const client of clients) await client.close().catch(() => {});
+    child.kill();
+    await new Promise<void>((resolve) =>
+      child.exitCode === null ? child.once("exit", () => resolve()) : resolve(),
+    );
+  }
+});
+
 test("O4: creating more MCP sessions than the configured maximum is refused with 503", async () => {
   const server = await running(fakeMcpDeps(), {}, { maxSessions: 2, sessionIdleMs: 60_000 });
   const port = server.http.port;
