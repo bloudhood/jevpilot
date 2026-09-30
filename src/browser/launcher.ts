@@ -595,10 +595,11 @@ export async function launchBrowser(
   try {
     let url: string;
     if (profile.kind !== "attach") {
-      directory = profile.userDataDir;
-      if (activeDirs.has(directory)) {
-        throw new BrowserConfigError(`profile already active: ${directory}`);
+      if (activeDirs.has(profile.userDataDir)) {
+        // `directory` stays unset: the profile belongs to the launch that holds it, not to this one.
+        throw new BrowserConfigError(`profile already active: ${profile.userDataDir}`);
       }
+      directory = profile.userDataDir;
       activeDirs.add(directory);
       await rm(join(directory, "DevToolsActivePort"), { force: true }).catch(() => {});
       // Chrome's password leak check opens a tab-modal dialog that blocks all input after a login with a

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { z } from "zod";
 import {
   blockedAddress,
-  blockedUrl,
+  checkUrl,
   type NetworkGuard,
   type AddressLookup,
 } from "../../security/address-guard.ts";
@@ -380,19 +380,21 @@ class CdpPageHandle implements PageHandle {
       (value) => {
         const event = value as { requestId: string; request: { url: string }; frameId?: string };
         void (async () => {
-          let address: string | undefined;
-          try {
-            address = await blockedUrl(event.request.url, this.networkGuard, this.lookup);
-          } catch {
-            /* Continue on lookup failure. */
-          }
-          const method = address ? "Fetch.failRequest" : "Fetch.continueRequest";
+          const verdict = await checkUrl(event.request.url, this.networkGuard, this.lookup);
+          const address = verdict.blocked;
+          // A host that could not be resolved for the check is not loaded when the browser resolves it
+          // itself, so a slow or failing lookup cannot be used to skip the check. Behind a proxy the proxy
+          // resolves the name and this lookup says nothing about it, so the page load goes on.
+          const unverified = verdict.unverified === true && this.checkResponseAddress;
+          const method = address || unverified ? "Fetch.failRequest" : "Fetch.continueRequest";
           try {
             await this.browser.client.call(
               method,
               address
                 ? { requestId: event.requestId, errorReason: "BlockedByClient" }
-                : { requestId: event.requestId },
+                : unverified
+                  ? { requestId: event.requestId, errorReason: "NameNotResolved" }
+                  : { requestId: event.requestId },
               sessionId,
             );
           } catch (error) {
@@ -505,6 +507,12 @@ class CdpPageHandle implements PageHandle {
   }
 
   private detachFrame(sessionId: string): void {
+    // Chrome dismisses a dialog whose frame goes away, and no answer can reach a session that is gone,
+    // so a dialog kept for it would block every later call on this page.
+    if (this.pendingDialogSessionId === sessionId) {
+      this.pendingDialog = undefined;
+      this.pendingDialogSessionId = undefined;
+    }
     for (const [frameId, child] of this.children) {
       if (child.sessionId === sessionId || child.parentSessionId === sessionId) {
         this.children.delete(frameId);
@@ -1208,6 +1216,12 @@ export function createCdpDriver(deps: LaunchDeps & { lookup?: AddressLookup } = 
           (arg) => arg.startsWith("--proxy-server") || arg.startsWith("--proxy-pac-url"),
         ) &&
           !profile.proxy);
+      const rejected = async (url: string): Promise<string | undefined> => {
+        const verdict = await checkUrl(url, networkGuard, deps.lookup);
+        return (
+          verdict.blocked ?? (verdict.unverified && checkResponseAddress ? "unverified" : undefined)
+        );
+      };
       const browser = await launchBrowser(profile, options, deps);
       const capabilities = {
         ...cdpCapabilities,
@@ -1288,7 +1302,7 @@ export function createCdpDriver(deps: LaunchDeps & { lookup?: AddressLookup } = 
           let popupSession: BrowserSession | undefined;
           let popupPage: CdpPageHandle | undefined;
           try {
-            const initialBlocked = await blockedUrl(target.url ?? "", networkGuard, deps.lookup);
+            const initialBlocked = await rejected(target.url ?? "");
             if (initialBlocked) {
               await browser.client.call("Target.closeTarget", { targetId: target.targetId });
               return;
@@ -1300,10 +1314,7 @@ export function createCdpDriver(deps: LaunchDeps & { lookup?: AddressLookup } = 
             popupPage = page;
             await page.enableNetworkGuard();
             const currentUrl = await popupSession.targetUrl().catch(() => "");
-            if (
-              page.blockedRequest() ||
-              (await blockedUrl(currentUrl, networkGuard, deps.lookup))
-            ) {
+            if (page.blockedRequest() || (await rejected(currentUrl))) {
               await page.close();
               return;
             }
@@ -1349,7 +1360,7 @@ export function createCdpDriver(deps: LaunchDeps & { lookup?: AddressLookup } = 
         const page = [...pages.values()].find((candidate) => candidate.ownsFrame(event.frameId));
         if (!page) return;
         void (async () => {
-          if (await blockedUrl(event.url, networkGuard, deps.lookup)) {
+          if (await rejected(event.url)) {
             await browser.client
               .call("Browser.cancelDownload", { guid: event.guid })
               .catch(() => {});

@@ -135,6 +135,31 @@ async function launchPreferencesFixture(
   return { fake, browser };
 }
 
+test("R6: a refused second launch of a profile does not release it for a third", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "jevpilot-r6-"));
+  let launched: Awaited<ReturnType<typeof launchPreferencesFixture>> | undefined;
+  try {
+    launched = await launchPreferencesFixture(directory);
+    const again = () =>
+      launchBrowser(
+        { ...profile, userDataDir: directory, executable: "/bin/chromium" },
+        {
+          selfCheck: false,
+        },
+      );
+    for (let attempt = 0; attempt < 3; attempt++)
+      await assert.rejects(again(), /profile already active/u, `attempt ${attempt}`);
+    await launched.browser.close();
+    // Once its owner closes, the profile can be launched again.
+    await launched.fake.close();
+    launched = await launchPreferencesFixture(directory);
+  } finally {
+    await launched?.browser.close();
+    await launched?.fake.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("O9f: a launched profile gets password saving and leak detection turned off", async () => {
   const directory = await mkdtemp(join(tmpdir(), "jevpilot-o9f-"));
   let launched: Awaited<ReturnType<typeof launchPreferencesFixture>> | undefined;

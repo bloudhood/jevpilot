@@ -4,6 +4,7 @@ import { isAbsolute, join, relative, sep } from "node:path";
 import { createOwnedTempDir } from "../util/owned-temp.ts";
 import { createDecisionPort } from "../decision/port.ts";
 import { appendCalibrationRecord, calibrationRequestRecord } from "./decision-log.ts";
+import { redactSecret } from "./redact.ts";
 import {
   CircuitOpenError,
   ContextLimitError,
@@ -198,6 +199,30 @@ const withTarget = (action: Action, target: Target): Action => {
       return action;
   }
 };
+// The key of a chord such as "Control+Enter", split the way the input layer splits it.
+const keyOf = (name: string): string =>
+  Array.from(name).length === 1 ? name : (name.split("+").pop() ?? "");
+const entersForm = (name: string): boolean => keyOf(name) === "Enter";
+// Enter and Space activate the focused button or link, as a click would.
+const activatesFocus = (name: string): boolean =>
+  entersForm(name) || keyOf(name) === "Space" || keyOf(name) === " ";
+const dialogGone = (error: unknown): boolean =>
+  error instanceof Error &&
+  error.name === "CdpProtocolError" &&
+  (error as Error & { code?: unknown }).code === -32602 &&
+  /no dialog is showing/iu.test(error.message);
+const samePage = (left: string, right: string): boolean => {
+  const withoutHash = (url: string): string => {
+    try {
+      const parsed = new URL(url);
+      parsed.hash = "";
+      return parsed.href;
+    } catch {
+      return url;
+    }
+  };
+  return withoutHash(left) === withoutHash(right);
+};
 const domainOf = (url: string): string | undefined => {
   try {
     return new URL(url).hostname.toLowerCase();
@@ -309,6 +334,8 @@ export class OrchestratorSession {
   epoch = 0;
   pendingGatedAction?: {
     action: Action;
+    /** The page the gate was raised on; an approval does not carry over to another page. */
+    url: string;
     epoch: number;
     ref: string;
     fingerprint: string;
@@ -541,8 +568,7 @@ export class OrchestratorSession {
   }
   private scrub(value: string): string {
     let clean = value;
-    for (const secret of this.secretLiterals)
-      if (secret) clean = clean.replaceAll(secret, "[REDACTED]");
+    for (const secret of this.secretLiterals) clean = redactSecret(clean, secret);
     for (const item of Object.values(this.values))
       if (isSecret(item)) clean = clean.replaceAll(item.secret_ref, "[REDACTED]");
     return clean;
@@ -1345,7 +1371,11 @@ export class OrchestratorSession {
       promptText = resolved;
     }
     const started = this.deps.now();
-    await this.page.handleDialog(accept, promptText);
+    await this.page.handleDialog(accept, promptText).catch((error: unknown) => {
+      // The dialog can be gone before it is answered (its frame was removed or the page moved on); a
+      // record of it would otherwise hold the session at this handoff for good.
+      if (!dialogGone(error)) throw error;
+    });
     delete this.pendingDialog;
     this.steps++;
     this.invocationSteps++;
@@ -1520,6 +1550,7 @@ export class OrchestratorSession {
       if (domain) {
         this.pendingGatedAction = {
           action,
+          url: observation.url,
           epoch: target!.epoch,
           ref: target!.ref,
           fingerprint: target!.fingerprint,
@@ -1535,7 +1566,9 @@ export class OrchestratorSession {
       }
     }
     const submitButton =
-      (action.kind === "submit" || (action.kind === "key" && action.name === "Enter")) &&
+      (action.kind === "submit" ||
+        (action.kind === "type" && action.submit === true) ||
+        (action.kind === "key" && entersForm(action.name))) &&
       element?.formId
         ? observation.elements.find(
             (item) =>
@@ -1549,11 +1582,14 @@ export class OrchestratorSession {
     const matched = submitButton
       ? irreversibleActionMatch(submitButton)
       : action.kind === "key"
-        ? undefined
+        ? element && activatesFocus(action.name)
+          ? irreversibleActionMatch(element)
+          : undefined
         : element && irreversibleActionMatch(element);
     if (matched && !this.constraints.allow_irreversible && !approved) {
       this.pendingGatedAction = {
         action,
+        url: observation.url,
         epoch: target!.epoch,
         ref: target!.ref,
         fingerprint: target!.fingerprint,
@@ -2021,6 +2057,7 @@ export class OrchestratorSession {
             if (element)
               this.pendingGatedAction = {
                 action: outcome.pendingAction,
+                url: observation.url,
                 ...target,
                 role: element.role,
                 name: element.name,
@@ -2152,7 +2189,9 @@ export class OrchestratorSession {
       delete this.pendingGatedAction;
       try {
         const current = await this.sample();
-        const refreshed = this.retargetAction(pending.action, pending, current.observation);
+        const refreshed = samePage(pending.url, current.observation.url)
+          ? this.retargetAction(pending.action, pending, current.observation)
+          : undefined;
         if (!refreshed) return this.handoff("uncertain", { missing: "stored target changed" });
         const result = await this.execute(
           refreshed,
@@ -2339,7 +2378,7 @@ export class OrchestratorSession {
           ]);
           if (!focused) return this.handoff("uncertain", { missing: "target cannot be focused" });
         }
-        if (action.kind === "key" && action.name === "Enter") {
+        if (action.kind === "key" && activatesFocus(action.name)) {
           const focusedRef =
             op.ref ??
             (await this.page
@@ -2348,7 +2387,12 @@ export class OrchestratorSession {
           const focused = sampled.observation.elements.find(
             (element) => element.ref === focusedRef,
           );
-          if (focused?.formId)
+          // Enter submits the focused field's form; Enter or Space on a focused control clicks it.
+          // Either is gated like the click or submit it stands for.
+          if (
+            focused &&
+            ((entersForm(action.name) && focused.formId) || irreversibleActionMatch(focused))
+          )
             action = {
               ...action,
               target: {

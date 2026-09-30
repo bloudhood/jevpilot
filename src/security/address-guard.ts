@@ -7,7 +7,7 @@ export type AddressLookup = (
   options: { all: true },
 ) => Promise<{ address: string; family: number }[]>;
 
-const metadata = ["169.254.0.0/16", "100.100.100.200/32", "fd00:ec2::254/128"];
+const metadata = ["169.254.0.0/16", "100.100.100.200/32", "168.63.129.16/32", "fd00:ec2::254/128"];
 const privateRanges = [
   "0.0.0.0/8",
   "10.0.0.0/8",
@@ -100,14 +100,19 @@ export function urlHost(url: string): string | undefined {
   }
 }
 
-export async function blockedUrl(
+export type UrlVerdict = { blocked?: string; unverified?: true };
+
+// `blocked` is the address that is not allowed. `unverified` means the host could not be resolved to check
+// it: a name that does not exist (ENOTFOUND, ENODATA) cannot be reached either, but a timeout or any other
+// resolver failure leaves the host unchecked while the browser may still resolve it.
+export async function checkUrl(
   url: string,
   guard: NetworkGuard,
   lookup: AddressLookup = dnsLookup,
-): Promise<string | undefined> {
+): Promise<UrlVerdict> {
   const host = urlHost(url);
-  if (!host || (guard.mode === "off" && guard.extraBlocked.length === 0)) return undefined;
-  if (isIP(host)) return blockedAddress(host, guard) ? host : undefined;
+  if (!host || (guard.mode === "off" && guard.extraBlocked.length === 0)) return {};
+  if (isIP(host)) return blockedAddress(host, guard) ? { blocked: host } : {};
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const addresses = await Promise.race([
@@ -116,10 +121,20 @@ export async function blockedUrl(
         timer = setTimeout(() => reject(new Error("DNS timeout")), 2000);
       }),
     ]);
-    return addresses.find((item) => blockedAddress(item.address, guard))?.address;
-  } catch {
-    return undefined;
+    const blocked = addresses.find((item) => blockedAddress(item.address, guard))?.address;
+    return blocked ? { blocked } : {};
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    return code === "ENOTFOUND" || code === "ENODATA" ? {} : { unverified: true };
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+export async function blockedUrl(
+  url: string,
+  guard: NetworkGuard,
+  lookup: AddressLookup = dnsLookup,
+): Promise<string | undefined> {
+  return (await checkUrl(url, guard, lookup)).blocked;
 }

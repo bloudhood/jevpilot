@@ -10,12 +10,13 @@ import { fakeCdp, type Message, type Send } from "../browser/fake-cdp.ts";
 import { parseNetworkGuard } from "../../src/mcp/network-guard.ts";
 import {
   blockedUrl,
+  checkUrl,
   type AddressLookup,
   type NetworkGuard,
 } from "../../src/security/address-guard.ts";
 
-async function waitUntil(predicate: () => boolean): Promise<void> {
-  const deadline = Date.now() + 1000;
+async function waitUntil(predicate: () => boolean, timeoutMs = 1000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
     if (Date.now() >= deadline) throw new Error("fake CDP event timed out");
     await new Promise((resolve) => setTimeout(resolve, 5));
@@ -224,6 +225,7 @@ test("O3: a paused document request is failed when its host resolves to a blocke
   const guard = parseNetworkGuard("metadata");
   const lookup: AddressLookup = async (host) => {
     if (host === "error.test") throw new Error("lookup failed");
+    if (host === "gone.test") throw Object.assign(new Error("not found"), { code: "ENOTFOUND" });
     if (host === "slow.test") return new Promise(() => {});
     return host === "metadata.test"
       ? [{ address: "169.254.1.1", family: 4 }]
@@ -234,7 +236,18 @@ test("O3: a paused document request is failed when its host resolves to a blocke
   assert.equal(await blockedUrl("http://error.test/", guard, lookup), undefined);
   const slowStarted = Date.now();
   assert.equal(await blockedUrl("http://slow.test/", guard, lookup), undefined);
-  assert.ok(Date.now() - slowStarted < 3000, "a hanging lookup continues after its bound");
+  assert.ok(
+    Date.now() - slowStarted < 3000,
+    "a hanging lookup does not hold the check past its bound",
+  );
+  // R5: a host that could not be resolved is reported as unverified; a name that does not exist is not.
+  assert.deepEqual(await checkUrl("http://error.test/", guard, lookup), { unverified: true });
+  assert.deepEqual(await checkUrl("http://slow.test/", guard, lookup), { unverified: true });
+  assert.deepEqual(await checkUrl("http://gone.test/", guard, lookup), {});
+  assert.deepEqual(await checkUrl("http://safe.test/", guard, lookup), {});
+  assert.deepEqual(await checkUrl("http://metadata.test/", guard, lookup), {
+    blocked: "169.254.1.1",
+  });
 
   const host = await fixture({ networkGuard: guard, lookup });
   try {
@@ -254,6 +267,8 @@ test("O3: a paused document request is failed when its host resolves to a blocke
       r2: "http://safe.test/",
       r3: "http://error.test/",
       r4: "http://169.254.169.254/latest/",
+      r6: "http://gone.test/",
+      r7: "http://slow.test/",
     };
     for (const [requestId, url] of Object.entries(urls))
       host.event(
@@ -266,9 +281,9 @@ test("O3: a paused document request is failed when its host resolves to a blocke
         (message) =>
           message.method === "Fetch.failRequest" || message.method === "Fetch.continueRequest",
       );
-    await waitUntil(() => answered().length >= 4);
+    await waitUntil(() => answered().length >= 6, 4000);
     await new Promise((resolve) => setTimeout(resolve, 50));
-    assert.equal(answered().length, 4, "each paused request is answered exactly once");
+    assert.equal(answered().length, 6, "each paused request is answered exactly once");
     const byRequest = new Map(
       answered().map((message) => [(message.params as { requestId: string }).requestId, message]),
     );
@@ -277,7 +292,17 @@ test("O3: a paused document request is failed when its host resolves to a blocke
       errorReason: "BlockedByClient",
     });
     assert.equal(byRequest.get("r2")?.method, "Fetch.continueRequest");
-    assert.equal(byRequest.get("r3")?.method, "Fetch.continueRequest");
+    // R5: a lookup that failed leaves the host unchecked, so the request is not sent; a name that does
+    // not exist is left to the browser, which fails it too. Neither ends the session.
+    assert.deepEqual(byRequest.get("r3")?.params, {
+      requestId: "r3",
+      errorReason: "NameNotResolved",
+    });
+    assert.equal(byRequest.get("r6")?.method, "Fetch.continueRequest");
+    assert.deepEqual(byRequest.get("r7")?.params, {
+      requestId: "r7",
+      errorReason: "NameNotResolved",
+    });
     assert.equal(byRequest.get("r4")?.method, "Fetch.failRequest");
     // After the main document commits, an iframe request paused on the page's session is a child block.
     host.event(
@@ -668,6 +693,79 @@ test("OOPIF calls and events stay on the child flattened session", async () => {
         (message) =>
           message.method === "Page.handleJavaScriptDialog" && message.sessionId === "child",
       ),
+    );
+  } finally {
+    await host.close();
+  }
+});
+
+test("R6: a dialog of a frame that goes away no longer blocks the page", async () => {
+  const attach = async (host: Awaited<ReturnType<typeof fixture>>) => {
+    host.event(
+      "Target.attachedToTarget",
+      { sessionId: "child", targetInfo: { type: "iframe", targetId: "child-frame" } },
+      "s1",
+    );
+    host.event(
+      "Target.attachedToTarget",
+      { sessionId: "nested", targetInfo: { type: "iframe", targetId: "nested-frame" } },
+      "child",
+    );
+    await waitUntil(() =>
+      host.sent.some(
+        (message) => message.method === "Page.enable" && message.sessionId === "nested",
+      ),
+    );
+  };
+  const blockedBy = async (host: Awaited<ReturnType<typeof fixture>>, session: string) => {
+    const dialogs: string[] = [];
+    host.page.on("dialog", (dialog) => dialogs.push(dialog.message));
+    host.event("Page.javascriptDialogOpening", { type: "confirm", message: session }, session);
+    await waitUntil(() => dialogs.length === 1);
+    await assert.rejects(
+      host.page.callIsolated(() => true, []),
+      (error: unknown) => error instanceof DialogBlockingError,
+    );
+  };
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
+  // The frame that opened the dialog goes away.
+  for (const [dialogSession, detached, detachedFrom] of [
+    ["child", "child", "s1"],
+    ["nested", "nested", "child"],
+    ["nested", "child", "s1"],
+  ] as const) {
+    const host = await fixture();
+    try {
+      await attach(host);
+      await blockedBy(host, dialogSession);
+      host.event("Target.detachedFromTarget", { sessionId: detached }, detachedFrom);
+      await settle();
+      assert.equal(
+        await host.page.callIsolated(() => true, []),
+        true,
+        `${dialogSession} dialog, ${detached} detached`,
+      );
+    } finally {
+      await host.close();
+    }
+  }
+  // Another frame going away leaves the dialog in place.
+  const host = await fixture();
+  try {
+    await attach(host);
+    await blockedBy(host, "nested");
+    host.event("Target.detachedFromTarget", { sessionId: "unrelated" }, "s1");
+    await settle();
+    await assert.rejects(
+      host.page.callIsolated(() => true, []),
+      (error: unknown) => error instanceof DialogBlockingError,
+    );
+    await blockedBy(host, "s1");
+    host.event("Target.detachedFromTarget", { sessionId: "child" }, "s1");
+    await settle();
+    await assert.rejects(
+      host.page.callIsolated(() => true, []),
+      (error: unknown) => error instanceof DialogBlockingError,
     );
   } finally {
     await host.close();
@@ -1138,6 +1236,9 @@ test("R1: a popup that fails to attach leaves no page behind", async () => {
           (message.params as { targetId?: string }).targetId === "popup",
       ),
     );
+    // The close request is sent before its response is handled: wait for the failed popup to be
+    // gone instead of counting pages the moment the request is seen.
+    await waitUntil(() => host.browser.pages().length === 1);
     assert.equal(host.browser.pages().length, 1);
     host.event(
       "Page.javascriptDialogOpening",

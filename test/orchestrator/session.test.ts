@@ -5004,3 +5004,304 @@ test("R1: a page that keeps navigating does not hold browser_run past its budget
     await instance.session.close();
   }
 });
+
+test("R3: Enter or Space on a focused irreversible control waits for approval", async () => {
+  const items = [
+    element("Buy now", "button", { ref: "e1", tag: "button", inputType: "button" }),
+    element("Delete account", "link", {
+      ref: "e2",
+      tag: "a",
+      href: "http://example.test/delete",
+    }),
+    element("Delete draft", "button", {
+      ref: "e3",
+      tag: "button",
+      inputType: "button",
+      formId: "form:draft",
+    }),
+    element("Title", "textbox", {
+      ref: "e4",
+      tag: "input",
+      inputType: "text",
+      formId: "form:draft",
+    }),
+    element("Save", "button", {
+      ref: "e5",
+      tag: "button",
+      inputType: "submit",
+      formId: "form:draft",
+    }),
+    element("Next", "button", { ref: "e6", tag: "button", inputType: "button" }),
+  ];
+  const make = (allow = false) =>
+    fixture({
+      observations: [observation(items)],
+      options: { constraints: { allow_irreversible: allow }, budget: { steps: 1 } },
+    });
+  for (const [ref, key] of [
+    ["e1", "Enter"],
+    ["e1", "Space"],
+    ["e1", " "],
+    ["e1", "Control+Enter"],
+    ["e2", "Enter"],
+    ["e3", "Space"],
+    ["e3", "Enter"],
+  ] as const) {
+    const gated = make();
+    const allowed = make(true);
+    try {
+      gated.page.results.push(true);
+      const blocked = await gated.session.act([{ action: "press_key", ref, key }]);
+      assert.equal(blocked.status, "CONFIRM_REQUIRED", `${ref} ${key}`);
+      assert.equal(gated.seen.actions.length, 0, `${ref} ${key}`);
+      const approved = await gated.session.resume({ allow_irreversible: true });
+      assert.equal(approved.status, "BUDGET_EXHAUSTED", `${ref} ${key}`);
+      assert.equal(gated.seen.actions.length, 1, `${ref} ${key}`);
+      const pressed = gated.seen.actions[0] as Extract<Action, { kind: "key" }>;
+      assert.equal(pressed.kind, "key");
+      assert.equal(pressed.name, key);
+      assert.equal(pressed.target?.ref, ref);
+      allowed.page.results.push(true);
+      assert.notEqual(
+        (await allowed.session.act([{ action: "press_key", ref, key }])).status,
+        "CONFIRM_REQUIRED",
+        `${ref} ${key}`,
+      );
+      assert.equal(allowed.seen.actions.length, 1, `${ref} ${key}`);
+    } finally {
+      await gated.session.close();
+      await allowed.session.close();
+    }
+  }
+  // A harmless button, a plain field, and keys that do not activate anything are not gated.
+  for (const [ref, key] of [
+    ["e6", "Enter"],
+    ["e6", "Space"],
+    ["e4", "Enter"],
+    ["e1", "Tab"],
+    ["e1", "Escape"],
+  ] as const) {
+    const instance = make();
+    try {
+      instance.page.results.push(true);
+      const result = await instance.session.act([{ action: "press_key", ref, key }]);
+      assert.notEqual(result.status, "CONFIRM_REQUIRED", `${ref} ${key}`);
+      assert.equal(instance.seen.actions.length, 1, `${ref} ${key}`);
+    } finally {
+      await instance.session.close();
+    }
+  }
+});
+
+test("R3: Enter after focusing a control without a ref waits for approval", async () => {
+  const buy = element("Buy now", "button", { ref: "e1", tag: "button", inputType: "button" });
+  const instance = fixture({
+    observations: [observation([buy])],
+    options: { budget: { steps: 1 } },
+  });
+  try {
+    instance.page.results.push("e1");
+    const blocked = await instance.session.act([{ action: "press_key", key: "Enter" }]);
+    assert.equal(blocked.status, "CONFIRM_REQUIRED");
+    assert.equal(instance.seen.actions.length, 0);
+  } finally {
+    await instance.session.close();
+  }
+});
+
+test("R3: typing with submit into a form with an irreversible submit button waits for approval", async () => {
+  const field = element("Quantity", "textbox", {
+    ref: "e1",
+    tag: "input",
+    inputType: "text",
+    formId: "form:order",
+  });
+  const buy = element("Place order", "button", {
+    ref: "e2",
+    tag: "button",
+    inputType: "submit",
+    formId: "form:order",
+  });
+  const search = element("Search", "textbox", { ref: "e3", tag: "input", inputType: "search" });
+  const make = (allow = false) =>
+    fixture({
+      observations: [observation([field, buy, search])],
+      options: {
+        constraints: { allow_irreversible: allow },
+        budget: { steps: 1 },
+        values: { quantity: "2" },
+      },
+    });
+  for (const op of [
+    { action: "type", ref: "e1", text: "2", submit: true },
+    { action: "type", ref: "e1", value_key: "quantity", submit: true },
+  ] as const) {
+    const gated = make();
+    const allowed = make(true);
+    try {
+      const blocked = await gated.session.act([op]);
+      assert.equal(blocked.status, "CONFIRM_REQUIRED", JSON.stringify(op));
+      assert.equal(gated.seen.actions.length, 0, JSON.stringify(op));
+      const approved = await gated.session.resume({ allow_irreversible: true });
+      assert.equal(approved.status, "BUDGET_EXHAUSTED", JSON.stringify(op));
+      const typed = gated.seen.actions[0] as Extract<Action, { kind: "type" }>;
+      assert.equal(typed.kind, "type");
+      assert.equal(typed.submit, true);
+      assert.notEqual((await allowed.session.act([op])).status, "CONFIRM_REQUIRED");
+      assert.equal(allowed.seen.actions.length, 1);
+    } finally {
+      await gated.session.close();
+      await allowed.session.close();
+    }
+  }
+  const outside = make();
+  try {
+    const result = await outside.session.act([
+      { action: "type", ref: "e3", text: "shoes", submit: true },
+    ]);
+    assert.notEqual(result.status, "CONFIRM_REQUIRED");
+    assert.equal(outside.seen.actions.length, 1);
+    const notSubmitting = make();
+    try {
+      await notSubmitting.session.act([{ action: "type", ref: "e1", text: "2" }]);
+      assert.equal(notSubmitting.seen.actions.length, 1);
+    } finally {
+      await notSubmitting.session.close();
+    }
+  } finally {
+    await outside.session.close();
+  }
+});
+
+test("R4: encoded and cut-off echoes of a secret are redacted in results and decision requests", async () => {
+  const secret = "Pa$$ w0rd/9?&=+ long-token-value-0123456789-abcdefghijklmnopqrstuvwxyz-tail";
+  const encoded = encodeURIComponent(secret);
+  const cutOff = secret.slice(0, 60);
+  const page = observation(
+    [
+      element("Show password", "button", { ref: "e1" }),
+      element("Token", "textbox", { ref: "e2", tag: "input", inputType: "text", value: cutOff }),
+      element(`Copy ${cutOff}`, "button", { ref: "e3", containerText: `Signed in ${encoded}` }),
+    ],
+    "start",
+    `http://example.test/login?password=${encoded}`,
+  );
+  page.title = `Sign in ${encoded.slice(0, 20)}`;
+  page.text = `Wrong password ${secret.replace(/ /gu, "+")} for user`;
+  const seen: string[] = [];
+  const instance = fixture({
+    observations: [page],
+    buildDecisionState: (input) => {
+      seen.push(JSON.stringify(input.observation));
+      return { state: { observation: input.observation }, questions: {}, reductions: [] };
+    },
+    decide: async (request) => {
+      seen.push(JSON.stringify(request));
+      return decision;
+    },
+    outcomes: [{ type: "handoff", reason: "uncertain", source: "code", details: {} }],
+  });
+  (instance.session as unknown as { secretLiterals: Set<string> }).secretLiterals.add(secret);
+  try {
+    const result = await instance.session.run();
+    const returned = JSON.stringify(result);
+    for (const text of [...seen, returned]) {
+      assert.ok(text.includes("[REDACTED]"));
+      for (const leak of [
+        encoded,
+        encoded.slice(0, 20),
+        cutOff,
+        cutOff.slice(0, 12),
+        secret.replace(/ /gu, "+"),
+      ])
+        assert.equal(text.includes(leak), false, leak);
+    }
+    assert.equal(seen.length, 2);
+  } finally {
+    await instance.session.close();
+  }
+});
+
+test("R6: an approval does not carry over to another page", async () => {
+  const buy = element("Buy now", "button", { ref: "e1" });
+  for (const [next, expected] of [
+    ["http://example.test/start#details", "executed"],
+    ["http://example.test/other", "refused"],
+    ["http://other.test/start", "refused"],
+  ] as const) {
+    let url = "http://example.test/start";
+    const instance = fixture({
+      observe: async () => observation([buy], "start", url),
+      outcomes: [{ type: "act", action: action(buy) }],
+      options: { budget: { steps: 1 } },
+    });
+    try {
+      assert.equal((await instance.session.run()).status, "CONFIRM_REQUIRED");
+      url = next;
+      const resumed = await instance.session.resume({ allow_irreversible: true });
+      if (expected === "executed") {
+        assert.equal(instance.seen.actions.length, 1, next);
+      } else {
+        assert.equal(resumed.status, "UNCERTAIN", next);
+        assert.match(resumed.question, /stored target changed/u);
+        assert.equal(instance.seen.actions.length, 0, next);
+        // The approval is spent: coming back to the page does not revive it.
+        url = "http://example.test/start";
+        const again = await instance.session.resume({ allow_irreversible: true });
+        assert.notEqual(again.status, "DONE_VERIFIED");
+        assert.equal(instance.seen.actions.length, 0, next);
+      }
+    } finally {
+      await instance.session.close();
+    }
+  }
+});
+
+test("R6: a dialog that is already gone no longer holds the session", async () => {
+  const dialog = { kind: "confirm" as const, message: "Proceed?", defaultPrompt: "" };
+  for (const answer of ["resume", "act"] as const) {
+    const instance = fixture({
+      detect,
+      outcomes: [
+        { type: "act", action: action() },
+        { type: "handoff", reason: "info_not_on_page", source: "code", details: {} },
+      ],
+      execute: () => ({ ...changed(), outcome: "dialog-opened", dialog }),
+    });
+    let attempts = 0;
+    instance.page.handleDialog = async () => {
+      attempts++;
+      throw new CdpProtocolError(-32602, "No dialog is showing", "Page.handleJavaScriptDialog");
+    };
+    try {
+      assert.equal((await instance.session.run()).status, "CONFIRM_REQUIRED");
+      const answered =
+        answer === "resume"
+          ? await instance.session.resume({ dialog: { accept: true } })
+          : await instance.session.act([{ action: "dialog", accept: true }]);
+      assert.notEqual(answered.reason, "operation_failed", answer);
+      assert.equal(attempts, 1, answer);
+      assert.notEqual((await instance.session.observe()).status, "CONFIRM_REQUIRED", answer);
+      assert.equal(attempts, 1, answer);
+    } finally {
+      await instance.session.close();
+    }
+  }
+  // Any other failure to answer is still reported.
+  const failing = fixture({
+    detect,
+    outcomes: [{ type: "act", action: action() }],
+    execute: () => ({ ...changed(), outcome: "dialog-opened", dialog }),
+  });
+  failing.page.handleDialog = async () => {
+    throw new CdpProtocolError(-32000, "Something else failed", "Page.handleJavaScriptDialog");
+  };
+  try {
+    assert.equal((await failing.session.run()).status, "CONFIRM_REQUIRED");
+    const result = await failing.session.resume({ dialog: { accept: true } });
+    assert.equal(result.status, "FAILED");
+    assert.equal((await failing.session.observe()).status, "CONFIRM_REQUIRED");
+  } finally {
+    await failing.session.close();
+  }
+});
