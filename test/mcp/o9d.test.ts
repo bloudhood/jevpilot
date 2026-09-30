@@ -1,18 +1,32 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { EngineRegistry } from "../../src/engine/registry.ts";
 import type { BrowserHandle, EngineDriver } from "../../src/engine/types.ts";
 import { createServer } from "../../src/mcp/server.ts";
+import type { SessionDeps } from "../../src/orchestrator/session.ts";
 import { fakeMcpDeps } from "../support/mcp-fixture.ts";
 import { FakePageHandle } from "../support/fake-engine.ts";
 
 const structured = (value: unknown): Record<string, unknown> =>
   (value as { structuredContent: Record<string, unknown> }).structuredContent;
 
-function setup() {
+async function waitFor(predicate: () => boolean): Promise<void> {
+  const deadline = Date.now() + 2000;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error("condition not reached");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+function setup(orchestrator: Partial<SessionDeps> = {}) {
   const deps = fakeMcpDeps();
+  deps.orchestrator = { ...deps.orchestrator, ...orchestrator };
   let launches = 0;
   let current: { handle: BrowserHandle; disconnect: () => void; closed: boolean } | undefined;
   let closedBeforeLaunch = false;
@@ -135,5 +149,33 @@ test("O9d: the disconnected browser is closed before the relaunch", async () => 
   } finally {
     await client.close();
     await setupState.app.close();
+  }
+});
+
+test("R5: a session whose browser disconnected gives up its handoff screenshots", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "jevpilot-r5-shots-"));
+  const setupState = setup({ tempDir: async () => directory });
+  const client = await connectedClient(setupState.app);
+  try {
+    const run = structured(
+      await client.callTool({ name: "browser_run", arguments: { goal: "Finish" } }),
+    );
+    assert.equal(run.status, "NEEDS_VALUES");
+    const shot = String(run.screenshot_path);
+    assert.equal(existsSync(shot), true, "the handoff wrote a screenshot");
+    setupState.disconnect();
+    const observed = structured(
+      await client.callTool({ name: "browser_observe", arguments: { session: run.session } }),
+    );
+    assert.equal(observed.reason, "browser_disconnected");
+    await waitFor(() => !existsSync(directory));
+    const closed = structured(
+      await client.callTool({ name: "browser_close", arguments: { session: run.session } }),
+    );
+    assert.equal(closed.closed, true);
+  } finally {
+    await client.close();
+    await setupState.app.close();
+    await rm(directory, { recursive: true, force: true });
   }
 });

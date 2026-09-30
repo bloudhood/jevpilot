@@ -198,6 +198,9 @@ export function createServer(deps: McpDeps): {
   // this set after every await so nothing is created for a session once its close has started.
   const closingSessions = new Set<string>();
   let reclaiming: Promise<void> | undefined;
+  // Runs that passed the session limit and are still opening their tab count against it: without them,
+  // concurrent browser_run calls would each see room and together exceed the limit.
+  let openingSessions = 0;
   let browser: BrowserHandle | undefined;
   let launching: Promise<BrowserHandle> | undefined;
   let selectedEngine: string | undefined;
@@ -221,11 +224,13 @@ export function createServer(deps: McpDeps): {
 
   const markBrowserDisconnected = (handle: BrowserHandle): void => {
     if (browser !== handle) return;
-    for (const id of sessions.keys()) {
+    for (const [id, instance] of sessions) {
       disconnectedSessions.add(id);
       if (disconnectedSessions.size > 256)
         disconnectedSessions.delete(disconnectedSessions.values().next().value!);
       sessions.delete(id);
+      // Closing the session removes its handoff screenshots; closing its tab fails, which is ignored.
+      void instance.close().catch(() => {});
       const directory = screenshotDirs.get(id);
       screenshotDirs.delete(id);
       if (directory) void rm(directory, { recursive: true, force: true }).catch(() => {});
@@ -404,17 +409,23 @@ export function createServer(deps: McpDeps): {
           if (busySessions.has(id)) return;
           if ((deps.clock ?? Date.now)() - instance.updatedAt < instance.idleTimeoutMs) return;
           closingSessions.add(id);
+          let reclaimed = false;
           try {
-            if (!(await instance.reclaimIdle()) || sessions.get(id) !== instance) return;
-            sessions.delete(id);
-            const directory = screenshotDirs.get(id);
-            screenshotDirs.delete(id);
-            if (directory) await rm(directory, { recursive: true, force: true });
-          } finally {
-            // The reclaim attempt began closing the session, so it cannot be used again;
-            // always drop the marker or the id would wedge every later call on it.
-            closingSessions.delete(id);
+            reclaimed = await instance.reclaimIdle();
+          } catch (error) {
+            // Closing has begun, so the session cannot be used again; drop it and report the failure.
+            reclaimed = true;
+            process.stderr.write(`jevpilot-mcp idle session close failed: ${errorClass(error)}\n`);
           }
+          if (!reclaimed || sessions.get(id) !== instance) {
+            closingSessions.delete(id);
+            return;
+          }
+          sessions.delete(id);
+          closingSessions.delete(id);
+          const directory = screenshotDirs.get(id);
+          screenshotDirs.delete(id);
+          if (directory) await rm(directory, { recursive: true, force: true });
         }),
       );
     })().finally(() => {
@@ -440,8 +451,9 @@ export function createServer(deps: McpDeps): {
         ? Promise.resolve(result(noDecisionPort()))
         : handle("browser_run", async () => {
             if (input.url) requireHttpUrl(input.url);
-            if (sessions.size >= (deps.maxSessions ?? 8)) await sweepIdle();
-            if (sessions.size >= (deps.maxSessions ?? 8))
+            const full = (): boolean => sessions.size + openingSessions >= (deps.maxSessions ?? 8);
+            if (full()) await sweepIdle();
+            if (full())
               return {
                 status: "FAILED" as const,
                 reason: "too_many_sessions",
@@ -454,12 +466,26 @@ export function createServer(deps: McpDeps): {
                 timing: { total: 0, decide: 0, browser: 0, harness: 0 },
                 usage: { decision_tokens: 0 },
               };
-            const active = await getBrowser(input.profile);
-            if (deps.isolatedSessions && !active.capabilities.isolatedContexts)
+            openingSessions++;
+            let opening = true;
+            const registered = (): void => {
+              if (opening) openingSessions--;
+              opening = false;
+            };
+            const active = await getBrowser(input.profile).catch((error: unknown) => {
+              registered();
+              throw error;
+            });
+            if (deps.isolatedSessions && !active.capabilities.isolatedContexts) {
+              registered();
               throw new McpUserError("Selected engine does not support isolated sessions.");
-            const page = await active.newPage(
-              deps.isolatedSessions ? { isolated: { copyCookies: false } } : undefined,
-            );
+            }
+            const page = await active
+              .newPage(deps.isolatedSessions ? { isolated: { copyCookies: false } } : undefined)
+              .catch((error: unknown) => {
+                registered();
+                throw error;
+              });
             try {
               let initialBlockedRequest: PageEvents["requestBlocked"] | undefined;
               page.on("requestBlocked", (event) => {
@@ -602,8 +628,10 @@ export function createServer(deps: McpDeps): {
                 },
               );
               sessions.set(instance.id, instance);
+              registered();
               return await inSession(instance, () => instance.run());
             } catch (error) {
+              registered();
               if (![...sessions.values()].some((item) => item.page === page))
                 await page.close().catch(() => {});
               throw error;
@@ -830,12 +858,18 @@ export function createServer(deps: McpDeps): {
         if (!instance)
           throw new McpUserError("Unknown session. Start a new session with browser_run.");
         closingSessions.add(input.session);
-        await instance.close();
-        sessions.delete(input.session);
-        disconnectedSessions.delete(input.session);
-        const directory = screenshotDirs.get(input.session);
-        screenshotDirs.delete(input.session);
-        if (directory) await rm(directory, { recursive: true, force: true });
+        try {
+          await instance.close();
+        } finally {
+          // A tab that cannot be closed (already gone, or the browser is unresponsive) must not leave the
+          // session registered: it is unusable once closing began and would hold a place in the limit.
+          sessions.delete(input.session);
+          closingSessions.delete(input.session);
+          disconnectedSessions.delete(input.session);
+          const directory = screenshotDirs.get(input.session);
+          screenshotDirs.delete(input.session);
+          if (directory) await rm(directory, { recursive: true, force: true });
+        }
         return { session: input.session, closed: true as const };
       }),
   );

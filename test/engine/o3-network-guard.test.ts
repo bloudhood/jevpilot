@@ -13,6 +13,7 @@ test("O3: the metadata guard blocks cloud metadata addresses in every notation",
     "169.254.169.254",
     "169.254.170.2",
     "100.100.100.200",
+    "168.63.129.16",
     "fd00:ec2::254",
     "::ffff:169.254.169.254",
   ])

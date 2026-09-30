@@ -681,6 +681,28 @@ test("irreversible scope ignores long headline links but gates short action link
   );
 });
 
+test("R3: a clickable div is gated like a link and a long clickable card is not", () => {
+  const state = input();
+  for (const name of ["Buy now", "Delete account", "Place order", "立即购买"]) {
+    state.candidateAction = { role: "clickable", name, tag: "div" };
+    assert.ok(
+      detect(state).some((finding) => finding.kind === "irreversible" && finding.level === "gate"),
+      name,
+    );
+  }
+  for (const name of [
+    "Read more",
+    "Acme widget deluxe kit with a buy one get one free promotion today",
+  ]) {
+    state.candidateAction = { role: "clickable", name, tag: "div" };
+    assert.equal(
+      detect(state).some((finding) => finding.kind === "irreversible"),
+      false,
+      name,
+    );
+  }
+});
+
 test("blocking precedence preserves advisory, gate, and event findings", () => {
   const state = input();
   state.observation.signals.passwordFieldVisible = true;

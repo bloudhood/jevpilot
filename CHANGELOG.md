@@ -2,6 +2,28 @@
 
 This project follows Keep a Changelog. Versions use Semantic Versioning.
 
+## [Unreleased]
+
+Fixes from a second code review, aimed at irreversible-action approval, secrets, the network guard and session state.
+
+### Security
+
+- Pressing Enter or Space (also in a chord such as Control+Enter) on a focused button or link that matches an irreversible action now waits for approval, whether or not the control is in a form and also for `type="button"` controls. Typing with `submit` into a form whose submit button is irreversible waits like Enter does, and elements the observer labels `clickable` (divs used as buttons) are matched like links.
+- An approval is tied to the page it was raised on: `allow_irreversible` on `browser_resume` no longer runs a stored action on a different page.
+- Secret redaction also covers a resolved secret that a page or URL echoes percent-encoded, form-encoded, with whitespace collapsed, or cut off after its first 8 or more characters, in results and in decision requests.
+- The network guard no longer skips a host it could not resolve: when the browser resolves names itself, a lookup timeout or resolver failure (other than a missing name) fails the document, popup or download instead of letting it through. Adds the Azure WireServer address to the metadata list.
+- Link targets that are not web addresses and form ids chosen by the page can no longer add lines or unquoted text to the questions sent to Jev.
+- Token counts in a decision response must be finite and not negative, so they cannot lower the decision budget.
+
+### Fixed
+
+- Concurrent `browser_run` calls can no longer exceed `JEVPILOT_MAX_SESSIONS`.
+- A session whose tab cannot be closed (already gone) is still released by `browser_close` and by idle reclamation, instead of staying registered and using up the session limit.
+- When the browser disconnects, its sessions are closed so their handoff screenshots are removed.
+- A dialog opened by a frame that goes away no longer blocks the page, and answering a dialog Chrome reports as no longer showing clears it instead of holding the session at the dialog handoff.
+- A refused second launch of a browser profile no longer releases the profile of the browser that is using it.
+- Two tests nested inside other tests (policy thresholds, observer shadow-root and delayed content) never ran; they run now.
+
 ## [0.1.1] - 2026-09-29
 
 Fixes from a multi-reviewer code review of 0.1.0.

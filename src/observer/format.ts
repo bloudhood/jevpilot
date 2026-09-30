@@ -1,12 +1,18 @@
 import { estimateTokens } from "../decision/limits.ts";
 import type { Observation, ObservedElement } from "./types.ts";
 
+// A link target that is not a web address is shown as the page wrote it; a line break in it must not
+// start a line of its own in the observation.
+const oneLine = (value: string): string => value.replace(/[\p{C}\p{Z}\s]+/gu, " ");
+
 export function shortenHref(href: string, pageUrl: string): string {
   try {
     const page = new URL(pageUrl);
     const target = new URL(href, page);
-    if (target.protocol !== "http:" && target.protocol !== "https:")
-      return href.slice(0, 59) + (href.length > 60 ? "…" : "");
+    if (target.protocol !== "http:" && target.protocol !== "https:") {
+      const flat = oneLine(href);
+      return flat.slice(0, 59) + (flat.length > 60 ? "…" : "");
+    }
     if (
       target.origin === page.origin &&
       target.pathname === page.pathname &&
@@ -18,7 +24,8 @@ export function shortenHref(href: string, pageUrl: string): string {
     const display = `${target.origin === page.origin ? "" : target.host}${target.pathname}${query}${target.hash}`;
     return display.length > 60 ? `${display.slice(0, 59)}…` : display;
   } catch {
-    return href.length > 60 ? `${href.slice(0, 59)}…` : href;
+    const flat = oneLine(href);
+    return flat.length > 60 ? `${flat.slice(0, 59)}…` : flat;
   }
 }
 

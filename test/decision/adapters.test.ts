@@ -115,6 +115,26 @@ describe("adapter responses", () => {
     });
   }
 
+  test("R7: provider usage must be a finite, non-negative token count", () => {
+    for (const usage of [
+      { input_tokens: -5, output_tokens: 1 },
+      { input_tokens: 1, output_tokens: -1 },
+      { input_tokens: Number.POSITIVE_INFINITY, output_tokens: 1 },
+      { input_tokens: 1, output_tokens: Number.NaN },
+    ])
+      assert.throws(
+        () => parseResponse(config("typesafe"), { ...(fixture("typesafe") as object), usage }),
+        (error: unknown) =>
+          error instanceof DecisionTransportError && error.message === "invalid provider response",
+        JSON.stringify(usage),
+      );
+    const zero = parseResponse(config("typesafe"), {
+      ...(fixture("typesafe") as object),
+      usage: { input_tokens: 0, output_tokens: 0 },
+    });
+    assert.deepEqual(zero.usage, { input_tokens: 0, output_tokens: 0 });
+  });
+
   test("Cloudflare accepts an unnested result", () => {
     const raw = { success: true, errors: [], result: fixture("typesafe") };
     assert.deepEqual(parseResponse(config("cloudflare"), raw).answers, answers);

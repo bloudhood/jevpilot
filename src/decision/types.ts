@@ -45,7 +45,11 @@ export const answerSchema = z.union([choiceAnswerSchema, scoreAnswerSchema, noul
 
 export const responseSchema = z.object({
   answers: z.record(answerSchema),
-  usage: z.object({ input_tokens: z.number(), output_tokens: z.number() }),
+  // Token counts feed the session's decision budget: a negative or infinite count must not be accepted.
+  usage: z.object({
+    input_tokens: z.number().finite().nonnegative(),
+    output_tokens: z.number().finite().nonnegative(),
+  }),
   model: z.string(),
 });
 

@@ -978,3 +978,136 @@ test("idle sweep leaves an in-flight browser run open", async () => {
     await app.close();
   }
 });
+
+test("R5: concurrent browser_run calls cannot exceed the session limit", async () => {
+  const deps = fakeMcpDeps();
+  deps.maxSessions = 1;
+  let openGate!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    openGate = resolve;
+  });
+  const opened: FakePageHandle[] = [];
+  deps.engines = new EngineRegistry({ default: { driver: "slow-fake", profile: {} } });
+  deps.engines.register({
+    kind: "slow-fake",
+    launch: async () => ({
+      engine: { name: "slow-fake", driver: "slow-fake", stealthLevel: "high" },
+      capabilities: new FakePageHandle().capabilities,
+      selfCheck: undefined,
+      connected: true,
+      onDisconnected: () => () => {},
+      newPage: async () => {
+        await gate;
+        const page = new FakePageHandle();
+        opened.push(page);
+        return page;
+      },
+      pages: () => opened,
+      close: async () => {},
+    }),
+  });
+  const app = createServer(deps);
+  const client = new Client({ name: "r5-limit", version: "1" });
+  const [left, right] = InMemoryTransport.createLinkedPair();
+  await app.server.connect(right);
+  await client.connect(left);
+  try {
+    const runs = [1, 2, 3].map(() =>
+      client.callTool({ name: "browser_run", arguments: { goal: "Finish" } }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    openGate();
+    const results = (await Promise.all(runs)).map(data);
+    assert.equal(opened.length, 1, "only one tab is opened");
+    assert.equal(results.filter((run) => run.reason === "too_many_sessions").length, 2);
+    // A run that fails while opening its tab gives its place back.
+    const failing = fakeMcpDeps();
+    failing.maxSessions = 1;
+    failing.engines = new EngineRegistry({ default: { driver: "failing-fake", profile: {} } });
+    let attempts = 0;
+    failing.engines.register({
+      kind: "failing-fake",
+      launch: async () => ({
+        engine: { name: "failing-fake", driver: "failing-fake", stealthLevel: "high" },
+        capabilities: new FakePageHandle().capabilities,
+        selfCheck: undefined,
+        connected: true,
+        onDisconnected: () => () => {},
+        newPage: async () => {
+          if (attempts++ === 0) throw new Error("no tab");
+          return new FakePageHandle();
+        },
+        pages: () => [],
+        close: async () => {},
+      }),
+    });
+    const second = createServer(failing);
+    const secondClient = new Client({ name: "r5-limit-retry", version: "1" });
+    const [secondLeft, secondRight] = InMemoryTransport.createLinkedPair();
+    await second.server.connect(secondRight);
+    await secondClient.connect(secondLeft);
+    try {
+      const refused = await secondClient.callTool({
+        name: "browser_run",
+        arguments: { goal: "Finish" },
+      });
+      assert.equal(refused.isError, true);
+      const admitted = data(
+        await secondClient.callTool({ name: "browser_run", arguments: { goal: "Finish" } }),
+      );
+      assert.notEqual(admitted.reason, "too_many_sessions");
+    } finally {
+      await secondClient.close();
+      await second.close();
+    }
+  } finally {
+    await client.close();
+    await app.close();
+  }
+});
+
+test("R5: a session whose tab cannot be closed is still released", async () => {
+  const deps = fakeMcpDeps();
+  let now = 1_000_000;
+  deps.maxSessions = 1;
+  deps.clock = () => now;
+  deps.orchestrator = { ...deps.orchestrator, now: () => now };
+  deps.sessionOptions = { idleTimeoutMs: 60_000 };
+  const app = createServer(deps);
+  const client = new Client({ name: "r5-close", version: "1" });
+  const [left, right] = InMemoryTransport.createLinkedPair();
+  await app.server.connect(right);
+  await client.connect(left);
+  const run = async () =>
+    data(await client.callTool({ name: "browser_run", arguments: { goal: "Finish" } }));
+  const unknown = async (session: unknown) => {
+    const result = await client.callTool({ name: "browser_observe", arguments: { session } });
+    return result.isError === true && /Unknown session/u.test(text(result));
+  };
+  try {
+    // browser_close: the tab is already gone.
+    const first = await run();
+    deps.pages[0]!.close = async () => {
+      throw new Error("No target with given id found");
+    };
+    const closed = await client.callTool({
+      name: "browser_close",
+      arguments: { session: first.session },
+    });
+    assert.equal(closed.isError, true, "the failure is reported");
+    assert.equal(await unknown(first.session), true, "the session is no longer registered");
+    const second = await run();
+    assert.notEqual(second.reason, "too_many_sessions", "its place in the limit is free");
+    // Idle reclamation: the same failure while sweeping.
+    deps.pages[1]!.close = async () => {
+      throw new Error("No target with given id found");
+    };
+    now += 60_001;
+    const third = await run();
+    assert.notEqual(third.reason, "too_many_sessions");
+    assert.equal(await unknown(second.session), true);
+  } finally {
+    await client.close();
+    await app.close();
+  }
+});
