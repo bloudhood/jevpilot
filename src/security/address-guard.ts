@@ -18,6 +18,12 @@ const privateRanges = [
   "198.18.0.0/15",
   "::/128",
   "::1/128",
+  // IPv4-compatible remnants (::a.b.c.d) with their own /96 range; :: and ::1 stay exact.
+  "::/96",
+  // IPv4-VPN translation (RFC 8215) alongside the well-known NAT64 prefix.
+  "64:ff9b:1::/48",
+  // 6to4 with an embedded IPv4 host part.
+  "2002::/16",
   "fc00::/7",
   "fe80::/10",
 ];
@@ -67,7 +73,15 @@ export function validCidr(value: string): boolean {
   const parts = value.split("/");
   if (parts.length !== 2 || !parts[0] || !parts[1] || !/^\d+$/u.test(parts[1])) return false;
   const address = bytes(parts[0]);
-  return !!address && Number(parts[1]) <= address.length * 8;
+  if (!address) return false;
+  const bits = Number(parts[1]);
+  if (bits > address.length * 8) return false;
+  // Host bits outside the prefix must be zero: "10.0.0.1/8" is rejected, use "10.0.0.0/8".
+  return address.every((byte, index) => {
+    const remaining = bits - index * 8;
+    const mask = remaining >= 8 ? 255 : remaining <= 0 ? 0 : (255 << (8 - remaining)) & 255;
+    return (byte & ~mask & 255) === 0;
+  });
 }
 
 export function blockedAddress(address: string, guard: NetworkGuard): boolean {
@@ -137,4 +151,72 @@ export async function blockedUrl(
   lookup: AddressLookup = dnsLookup,
 ): Promise<string | undefined> {
   return (await checkUrl(url, guard, lookup)).blocked;
+}
+
+// Chrome's MatchPattern: `*` matches any run of characters (including none), `?` any single one.
+function matchesPattern(text: string, pattern: string): boolean {
+  let t = 0;
+  let p = 0;
+  let star = -1;
+  let mark = 0;
+  while (t < text.length) {
+    if (p < pattern.length && (pattern[p] === "?" || pattern[p] === text[t])) {
+      t++;
+      p++;
+    } else if (p < pattern.length && pattern[p] === "*") {
+      star = p++;
+      mark = t;
+    } else if (star !== -1) {
+      p = star + 1;
+      t = ++mark;
+    } else return false;
+  }
+  while (p < pattern.length && pattern[p] === "*") p++;
+  return p === pattern.length;
+}
+
+// A replacement is `HOST`, `HOST:PORT`, `[IPV6]` or `[IPV6]:PORT`; the port never changes what it resolves to.
+function replacementHost(value: string): string {
+  const bracketed = /^\[([^\]]+)\](?::\d+)?$/u.exec(value);
+  if (bracketed) return bracketed[1]!;
+  return /^[^:]+:\d+$/u.test(value) ? value.slice(0, value.lastIndexOf(":")) : value;
+}
+
+/**
+ * Build an AddressLookup that mirrors Chrome's --host-resolver-rules so the guard resolves hosts the way
+ * the browser it protects does (Chrome applies the rules instead of DNS; a deployment using them would
+ * otherwise have the guard check an address the browser never connects to). Like Chrome, the last switch
+ * wins, `EXCLUDE` patterns are checked first, then `MAP` rules in order with the first match applying once
+ * and `*`/`?` wildcards in the pattern. A replacement that is a name is resolved normally, not mapped again,
+ * and `~NOTFOUND` fails the lookup like a missing name. Hosts no rule covers use the underlying lookup.
+ */
+export function lookupWithResolverRules(
+  extraArgs: readonly string[] | undefined,
+  fallback: AddressLookup = dnsLookup,
+): AddressLookup {
+  const raw = (extraArgs ?? []).filter((argument) => argument.startsWith("--host-resolver-rules="));
+  const value = raw.at(-1)?.slice("--host-resolver-rules=".length);
+  if (value === undefined) return fallback;
+  const excluded: string[] = [];
+  const maps: { pattern: string; replacement: string }[] = [];
+  for (const rule of value.split(",")) {
+    const parts = rule.trim().split(/\s+/u);
+    const keyword = parts[0]?.toLowerCase();
+    if (keyword === "exclude" && parts.length === 2) excluded.push(parts[1]!.toLowerCase());
+    else if (keyword === "map" && parts.length === 3)
+      maps.push({ pattern: parts[1]!.toLowerCase(), replacement: parts[2]! });
+  }
+  if (maps.length === 0) return fallback;
+  return async (hostname, options) => {
+    const name = hostname.toLowerCase();
+    if (excluded.some((pattern) => matchesPattern(name, pattern)))
+      return fallback(hostname, options);
+    const rule = maps.find((candidate) => matchesPattern(name, candidate.pattern));
+    if (!rule) return fallback(hostname, options);
+    if (rule.replacement.toUpperCase() === "~NOTFOUND")
+      throw Object.assign(new Error("host mapped to ~NOTFOUND"), { code: "ENOTFOUND" });
+    const address = replacementHost(rule.replacement);
+    const family = isIP(address);
+    return family ? [{ address, family }] : fallback(address, options);
+  };
 }

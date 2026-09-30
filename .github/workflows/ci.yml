@@ -2,12 +2,17 @@ name: CI
 on: [push, pull_request]
 permissions:
   contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   unit:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -23,7 +28,30 @@ jobs:
       - run: npm run build
   docker:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - run: docker build --target test -t jevpilot:test .
+      - uses: docker/setup-buildx-action@v3
+      - name: Build and cache the test image, then run the browser integration suite
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: test
+          load: true
+          tags: jevpilot:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
       - run: docker run --rm --init --shm-size=1g -e JEVPILOT_TEST_DISPLAY=xvfb jevpilot:test
+      # The runtime image is the shipping artifact: build it and smoke its entrypoint + doctor.
+      - name: Build the runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+          load: true
+          tags: jevpilot:runtime
+          cache-from: type=gha
+      - name: Smoke the runtime image (stdio tools + doctor)
+        run: |
+          docker run --rm --init --shm-size=1g jevpilot:runtime doctor --json --no-browser
+          echo 'in' | docker run --rm -i --shm-size=1g jevpilot:runtime > /dev/null

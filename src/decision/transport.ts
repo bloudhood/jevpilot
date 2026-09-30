@@ -12,6 +12,9 @@ export type TransportDeps = {
 export const defaultDeps: TransportDeps = {
   fetch: globalThis.fetch,
   clock: Date,
+  // Not unref'd: a retry waiting between attempts is work in progress. With nothing else holding the
+  // event loop (jevpilot-mcp doctor), an unref'd timer lets the process exit in the middle of the
+  // retry, silently and with status 0. The wait is bounded by the backoff cap (10 s).
   sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
   random: Math.random,
 };

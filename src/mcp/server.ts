@@ -2,6 +2,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { rm, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { createOwnedTempDir } from "../util/owned-temp.ts";
 import {
   CallToolRequestSchema,
@@ -297,8 +299,8 @@ export function createServer(deps: McpDeps): {
       .replace(/\b(?:env|file):[^\s,;]+/giu, "[REDACTED]")
       .replace(/\bsecret_ref\s*[:=]\s*[^\s,;]+/giu, "secret_ref=[REDACTED]")
       .replace(
-        /\b(?:api[_-]?key|secret|password|token|value|values)(?:\s*[:=]\s*)[^\s,;]+/giu,
-        "$1=[REDACTED]",
+        /\b(api[_-]?key|secret|password|token|value|values)(\s*[:=]\s*)[^\s,;]+/giu,
+        "$1$2[REDACTED]",
       )
       .replace(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/gu, "[REDACTED]")
       .slice(0, 300);
@@ -720,6 +722,7 @@ export function createServer(deps: McpDeps): {
                 }
                 directory = await creating;
                 if (closing || closingSessions.has(input.session) || !sessions.has(input.session)) {
+                  creatingScreenshotDirs.delete(input.session);
                   await rm(directory, { recursive: true, force: true });
                   return observed;
                 }
@@ -893,7 +896,23 @@ export function createServer(deps: McpDeps): {
     );
 
   const createMcpServer = (): McpServer => {
-    const server = new McpServer({ name: "jevpilot", version: "0.1.0" });
+    // The reported version must track package.json instead of a hardcoded constant that
+    // drifts from the release version.
+    let version = "0.0.0";
+    try {
+      version =
+        (
+          JSON.parse(
+            readFileSync(
+              join(fileURLToPath(new URL(".", import.meta.url)), "../../package.json"),
+              "utf8",
+            ),
+          ) as { version?: string }
+        ).version ?? version;
+    } catch {
+      // Keep the fallback version when package.json is not readable next to the build output.
+    }
+    const server = new McpServer({ name: "jevpilot", version });
     for (const register of registrations) register(server);
     server.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const tool = dispatch.get(request.params.name);
@@ -938,7 +957,9 @@ export function createServer(deps: McpDeps): {
         try {
           await browser?.close();
         } catch (error) {
-          process.stderr.write(`jevpilot-mcp browser close failed: ${String(error)}\n`);
+          process.stderr.write(
+            `jevpilot-mcp browser close failed: ${sanitizedErrorMessage(error)}\n`,
+          );
         }
         await server.close();
       })();

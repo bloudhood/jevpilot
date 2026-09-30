@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { McpUserError } from "./errors.ts";
 
 export const thresholdSchema = z
   .object({
@@ -22,9 +23,10 @@ export function parseThresholds(value: string | undefined): PolicyThresholds | u
   try {
     parsed = JSON.parse(value);
   } catch {
-    throw new Error("JEVPILOT_THRESHOLDS must be valid JSON.");
+    throw new McpUserError("JEVPILOT_THRESHOLDS must be valid JSON.");
   }
   const result = thresholdSchema.safeParse(parsed);
-  if (!result.success) throw new Error("JEVPILOT_THRESHOLDS contains invalid threshold values.");
+  if (!result.success)
+    throw new McpUserError("JEVPILOT_THRESHOLDS contains invalid threshold values.");
   return result.data;
 }

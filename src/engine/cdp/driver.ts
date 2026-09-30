@@ -4,6 +4,7 @@ import { z } from "zod";
 import {
   blockedAddress,
   checkUrl,
+  lookupWithResolverRules,
   type NetworkGuard,
   type AddressLookup,
 } from "../../security/address-guard.ts";
@@ -1216,8 +1217,13 @@ export function createCdpDriver(deps: LaunchDeps & { lookup?: AddressLookup } = 
           (arg) => arg.startsWith("--proxy-server") || arg.startsWith("--proxy-pac-url"),
         ) &&
           !profile.proxy);
+      // The guard must resolve hosts the way this browser does: mirror any
+      // --host-resolver-rules MAP entries unless a caller supplied its own lookup.
+      const effectiveLookup =
+        deps.lookup ??
+        lookupWithResolverRules(profile.kind === "attach" ? undefined : profile.extraArgs);
       const rejected = async (url: string): Promise<string | undefined> => {
-        const verdict = await checkUrl(url, networkGuard, deps.lookup);
+        const verdict = await checkUrl(url, networkGuard, effectiveLookup);
         return (
           verdict.blocked ?? (verdict.unverified && checkResponseAddress ? "unverified" : undefined)
         );
@@ -1271,7 +1277,7 @@ export function createCdpDriver(deps: LaunchDeps & { lookup?: AddressLookup } = 
             await browser.disposeContext(contextId);
           },
           networkGuard,
-          deps.lookup,
+          effectiveLookup,
           checkResponseAddress,
         );
         pages.set(page.id, page);

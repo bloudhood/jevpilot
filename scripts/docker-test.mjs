@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { createServer } from "node:net";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -68,6 +69,18 @@ assert.notEqual(browserCheck?.status, "fail", JSON.stringify(browserCheck));
 console.log(`runtime doctor: browser ${browserCheck?.status} (${browserCheck?.detail})`);
 
 // HTTP transport: bound to 0.0.0.0 inside the container, published only on the host's loopback.
+// A non-loopback bind needs JEVPILOT_HTTP_ALLOWED_HOSTS, and the Host header carries the published
+// port, so the port is fixed up front instead of letting docker pick one.
+const freePort = () =>
+  new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", () => {
+      const { port } = probe.address();
+      probe.close(() => resolve(port));
+    });
+  });
+const hostPort = await freePort();
 const token = randomBytes(24).toString("hex");
 const name = `jevpilot-http-smoke-${process.pid}`;
 await run([
@@ -82,14 +95,15 @@ await run([
   "-e",
   "JEVPILOT_HTTP_HOST=0.0.0.0",
   "-e",
+  `JEVPILOT_HTTP_ALLOWED_HOSTS=127.0.0.1:${hostPort},localhost:${hostPort}`,
+  "-e",
   `JEVPILOT_HTTP_TOKEN=${token}`,
   "-p",
-  "127.0.0.1:0:8940",
+  `127.0.0.1:${hostPort}:8940`,
   "jevpilot:runtime",
 ]);
 try {
-  const published = (await run(["port", name, "8940/tcp"])).trim().split(/\r?\n/u)[0];
-  const url = `http://${published}/mcp`;
+  const url = `http://127.0.0.1:${hostPort}/mcp`;
   let unauthorized;
   for (const deadline = Date.now() + 30_000; Date.now() < deadline; ) {
     unauthorized = await fetch(url, { method: "POST" }).catch(() => undefined);
