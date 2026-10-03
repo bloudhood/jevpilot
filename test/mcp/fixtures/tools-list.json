@@ -1,0 +1,2078 @@
+[
+  {
+    "name": "browser_run",
+    "description": "Open a new browser session and work toward a goal. Jev acts fast on its own and hands back early with a question when unsure; continue with browser_act / browser_resume from the returned snapshot. Returns a session ID and a status; handoff statuses include a concrete question for the agent or user. Reuse the session with browser_resume, browser_observe, browser_act, and browser_close.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "goal": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Task to complete in the browser."
+        },
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "description": "Initial HTTP(S) URL. Omit to start on a blank tab."
+        },
+        "navigation_timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647,
+          "description": "Navigation timeout in milliseconds; defaults to 30000."
+        },
+        "values": {
+          "type": "object",
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "secret_ref": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "origins": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "uri"
+                    },
+                    "minItems": 1
+                  }
+                },
+                "required": ["secret_ref", "origins"],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "description": "Every piece of text the page needs typed (search terms, form fields) must be given here as { short field description: text }. Text inside the goal is never typed. Secrets use {secret_ref: 'env:NAME' or 'file:PATH', origins: [...] }."
+        },
+        "success": {
+          "type": "object",
+          "properties": {
+            "url_matches": {
+              "type": "string"
+            },
+            "text_present": {
+              "type": "string"
+            },
+            "element_present": {
+              "type": "object",
+              "properties": {
+                "role": {
+                  "$ref": "#/properties/values/additionalProperties/anyOf/1/properties/secret_ref"
+                },
+                "name": {
+                  "$ref": "#/properties/values/additionalProperties/anyOf/1/properties/secret_ref"
+                }
+              },
+              "required": ["role", "name"],
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false,
+          "description": "Optional checks that are false now and become true only when the goal is done, e.g. url_matches for the result page. Checks that already hold on the start page are ignored."
+        },
+        "constraints": {
+          "type": "object",
+          "properties": {
+            "allowed_domains": {
+              "type": "array",
+              "items": {
+                "$ref": "#/properties/values/additionalProperties/anyOf/1/properties/secret_ref"
+              }
+            },
+            "allow_irreversible": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false,
+          "description": "Navigation allowlist and irreversible-action gate."
+        },
+        "budget": {
+          "type": "object",
+          "properties": {
+            "steps": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "seconds": {
+              "type": "number",
+              "minimum": 0
+            },
+            "decision_tokens": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "description": "Per-invocation limits."
+        },
+        "thresholds": {
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "target": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "value_for": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "option_for": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "situation": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "goal_met": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "goal_met_unchanged": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "check": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "check_margin": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          },
+          "additionalProperties": false,
+          "description": "Per-session decision confidence thresholds (0 to 1)."
+        },
+        "profile": {
+          "$ref": "#/properties/values/additionalProperties/anyOf/1/properties/secret_ref",
+          "description": "Configured engine profile name; defaults to the server engine."
+        }
+      },
+      "required": ["goal"],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "RUNNING",
+            "DONE_VERIFIED",
+            "DONE_UNVERIFIED",
+            "NEEDS_VALUES",
+            "NEEDS_LOGIN",
+            "BLOCKED_BY_CHALLENGE",
+            "BLOCKED_BY_POLICY",
+            "CONFIRM_REQUIRED",
+            "INFO_NOT_ON_PAGE",
+            "UNCERTAIN",
+            "STUCK",
+            "ERROR_PAGE",
+            "BUDGET_EXHAUSTED",
+            "FAILED"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "question": {
+          "type": "string"
+        },
+        "details": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "session": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "snapshot": {
+          "type": "string"
+        },
+        "screenshot_path": {
+          "type": "string"
+        },
+        "trace": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "step": {
+                "type": "number"
+              },
+              "op": {
+                "type": "string"
+              },
+              "target": {
+                "type": "object",
+                "properties": {
+                  "role": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": ["role", "name"],
+                "additionalProperties": false
+              },
+              "coveredBy": {
+                "type": "object",
+                "properties": {
+                  "role": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": ["role", "name"],
+                "additionalProperties": false
+              },
+              "confidence": {
+                "type": "number"
+              },
+              "outcome": {
+                "type": "string",
+                "enum": [
+                  "changed",
+                  "unchanged",
+                  "stale",
+                  "covered",
+                  "disabled",
+                  "invisible",
+                  "not-editable",
+                  "unstable",
+                  "select-failed",
+                  "dialog-opened",
+                  "value-not-set",
+                  "not-focusable",
+                  "accepted",
+                  "dismissed"
+                ]
+              },
+              "drift": {
+                "type": "boolean"
+              },
+              "ms": {
+                "type": "number"
+              },
+              "waitMs": {
+                "type": "number"
+              },
+              "phases": {
+                "type": "object",
+                "properties": {
+                  "precheck": {
+                    "type": "integer"
+                  },
+                  "input": {
+                    "type": "integer"
+                  },
+                  "settle": {
+                    "type": "integer"
+                  },
+                  "wait": {
+                    "type": "integer"
+                  },
+                  "resolve": {
+                    "type": "integer"
+                  },
+                  "observe": {
+                    "type": "integer"
+                  },
+                  "frames": {
+                    "type": "integer"
+                  },
+                  "children": {
+                    "type": "integer"
+                  },
+                  "harness": {
+                    "type": "integer"
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "required": ["step", "op", "outcome", "ms"],
+            "additionalProperties": false
+          }
+        },
+        "timing": {
+          "type": "object",
+          "properties": {
+            "total": {
+              "type": "number"
+            },
+            "decide": {
+              "type": "number"
+            },
+            "browser": {
+              "type": "number"
+            },
+            "harness": {
+              "type": "number"
+            }
+          },
+          "required": ["total", "decide", "browser", "harness"],
+          "additionalProperties": false
+        },
+        "usage": {
+          "type": "object",
+          "properties": {
+            "decision_tokens": {
+              "type": "number"
+            },
+            "detail": {
+              "type": "object",
+              "properties": {
+                "call": {
+                  "type": "object",
+                  "properties": {
+                    "decisions": {
+                      "type": "integer"
+                    },
+                    "input_tokens": {
+                      "type": "number"
+                    },
+                    "output_tokens": {
+                      "type": "number"
+                    },
+                    "decide_ms": {
+                      "type": "integer"
+                    },
+                    "browser_ms": {
+                      "type": "integer"
+                    },
+                    "harness_ms": {
+                      "type": "integer"
+                    },
+                    "total_ms": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "decisions",
+                    "input_tokens",
+                    "output_tokens",
+                    "decide_ms",
+                    "browser_ms",
+                    "harness_ms",
+                    "total_ms"
+                  ],
+                  "additionalProperties": false
+                },
+                "session": {
+                  "type": "object",
+                  "properties": {
+                    "decisions": {
+                      "type": "integer"
+                    },
+                    "input_tokens": {
+                      "type": "number"
+                    },
+                    "output_tokens": {
+                      "type": "number"
+                    },
+                    "decide_ms": {
+                      "type": "integer"
+                    },
+                    "browser_ms": {
+                      "type": "integer"
+                    },
+                    "harness_ms": {
+                      "type": "integer"
+                    },
+                    "total_ms": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "decisions",
+                    "input_tokens",
+                    "output_tokens",
+                    "decide_ms",
+                    "browser_ms",
+                    "harness_ms",
+                    "total_ms"
+                  ],
+                  "additionalProperties": false
+                },
+                "provider": {
+                  "type": "string"
+                },
+                "model": {
+                  "type": "string"
+                }
+              },
+              "required": ["call", "session"],
+              "additionalProperties": false
+            }
+          },
+          "required": ["decision_tokens"],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "status",
+        "reason",
+        "question",
+        "session",
+        "url",
+        "title",
+        "snapshot",
+        "trace",
+        "timing",
+        "usage"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "browser_resume",
+    "description": "Continue an existing session after a handoff. Supply missing values, refine the goal, or approve one pending irreversible action; approval is scoped to that action.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Session ID returned by browser_run."
+        },
+        "values": {
+          "type": "object",
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "secret_ref": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "origins": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "uri"
+                    },
+                    "minItems": 1
+                  }
+                },
+                "required": ["secret_ref", "origins"],
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "goal_update": {
+          "$ref": "#/properties/values/additionalProperties/anyOf/1/properties/secret_ref"
+        },
+        "allow_irreversible": {
+          "type": "boolean"
+        },
+        "allowed_domains": {
+          "type": "array",
+          "items": {
+            "$ref": "#/properties/values/additionalProperties/anyOf/1/properties/secret_ref"
+          }
+        },
+        "dialog": {
+          "type": "object",
+          "properties": {
+            "accept": {
+              "type": "boolean"
+            },
+            "value_key": {
+              "$ref": "#/properties/values/additionalProperties/anyOf/1/properties/secret_ref"
+            }
+          },
+          "required": ["accept"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["session"],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "RUNNING",
+            "DONE_VERIFIED",
+            "DONE_UNVERIFIED",
+            "NEEDS_VALUES",
+            "NEEDS_LOGIN",
+            "BLOCKED_BY_CHALLENGE",
+            "BLOCKED_BY_POLICY",
+            "CONFIRM_REQUIRED",
+            "INFO_NOT_ON_PAGE",
+            "UNCERTAIN",
+            "STUCK",
+            "ERROR_PAGE",
+            "BUDGET_EXHAUSTED",
+            "FAILED"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "question": {
+          "type": "string"
+        },
+        "details": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "session": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "snapshot": {
+          "type": "string"
+        },
+        "screenshot_path": {
+          "type": "string"
+        },
+        "trace": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "step": {
+                "type": "number"
+              },
+              "op": {
+                "type": "string"
+              },
+              "target": {
+                "type": "object",
+                "properties": {
+                  "role": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": ["role", "name"],
+                "additionalProperties": false
+              },
+              "coveredBy": {
+                "type": "object",
+                "properties": {
+                  "role": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": ["role", "name"],
+                "additionalProperties": false
+              },
+              "confidence": {
+                "type": "number"
+              },
+              "outcome": {
+                "type": "string",
+                "enum": [
+                  "changed",
+                  "unchanged",
+                  "stale",
+                  "covered",
+                  "disabled",
+                  "invisible",
+                  "not-editable",
+                  "unstable",
+                  "select-failed",
+                  "dialog-opened",
+                  "value-not-set",
+                  "not-focusable",
+                  "accepted",
+                  "dismissed"
+                ]
+              },
+              "drift": {
+                "type": "boolean"
+              },
+              "ms": {
+                "type": "number"
+              },
+              "waitMs": {
+                "type": "number"
+              },
+              "phases": {
+                "type": "object",
+                "properties": {
+                  "precheck": {
+                    "type": "integer"
+                  },
+                  "input": {
+                    "type": "integer"
+                  },
+                  "settle": {
+                    "type": "integer"
+                  },
+                  "wait": {
+                    "type": "integer"
+                  },
+                  "resolve": {
+                    "type": "integer"
+                  },
+                  "observe": {
+                    "type": "integer"
+                  },
+                  "frames": {
+                    "type": "integer"
+                  },
+                  "children": {
+                    "type": "integer"
+                  },
+                  "harness": {
+                    "type": "integer"
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "required": ["step", "op", "outcome", "ms"],
+            "additionalProperties": false
+          }
+        },
+        "timing": {
+          "type": "object",
+          "properties": {
+            "total": {
+              "type": "number"
+            },
+            "decide": {
+              "type": "number"
+            },
+            "browser": {
+              "type": "number"
+            },
+            "harness": {
+              "type": "number"
+            }
+          },
+          "required": ["total", "decide", "browser", "harness"],
+          "additionalProperties": false
+        },
+        "usage": {
+          "type": "object",
+          "properties": {
+            "decision_tokens": {
+              "type": "number"
+            },
+            "detail": {
+              "type": "object",
+              "properties": {
+                "call": {
+                  "type": "object",
+                  "properties": {
+                    "decisions": {
+                      "type": "integer"
+                    },
+                    "input_tokens": {
+                      "type": "number"
+                    },
+                    "output_tokens": {
+                      "type": "number"
+                    },
+                    "decide_ms": {
+                      "type": "integer"
+                    },
+                    "browser_ms": {
+                      "type": "integer"
+                    },
+                    "harness_ms": {
+                      "type": "integer"
+                    },
+                    "total_ms": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "decisions",
+                    "input_tokens",
+                    "output_tokens",
+                    "decide_ms",
+                    "browser_ms",
+                    "harness_ms",
+                    "total_ms"
+                  ],
+                  "additionalProperties": false
+                },
+                "session": {
+                  "type": "object",
+                  "properties": {
+                    "decisions": {
+                      "type": "integer"
+                    },
+                    "input_tokens": {
+                      "type": "number"
+                    },
+                    "output_tokens": {
+                      "type": "number"
+                    },
+                    "decide_ms": {
+                      "type": "integer"
+                    },
+                    "browser_ms": {
+                      "type": "integer"
+                    },
+                    "harness_ms": {
+                      "type": "integer"
+                    },
+                    "total_ms": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "decisions",
+                    "input_tokens",
+                    "output_tokens",
+                    "decide_ms",
+                    "browser_ms",
+                    "harness_ms",
+                    "total_ms"
+                  ],
+                  "additionalProperties": false
+                },
+                "provider": {
+                  "type": "string"
+                },
+                "model": {
+                  "type": "string"
+                }
+              },
+              "required": ["call", "session"],
+              "additionalProperties": false
+            }
+          },
+          "required": ["decision_tokens"],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "status",
+        "reason",
+        "question",
+        "session",
+        "url",
+        "title",
+        "snapshot",
+        "trace",
+        "timing",
+        "usage"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "browser_observe",
+    "description": "Read the current page in an existing session without taking action. Use full detail when the compact snapshot omits needed content. A screenshot path may be returned for handoffs when safe.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Session ID returned by browser_run."
+        },
+        "detail": {
+          "type": "string",
+          "enum": ["compact", "full"]
+        },
+        "screenshot": {
+          "type": "boolean"
+        }
+      },
+      "required": ["session"],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "RUNNING",
+            "DONE_VERIFIED",
+            "DONE_UNVERIFIED",
+            "NEEDS_VALUES",
+            "NEEDS_LOGIN",
+            "BLOCKED_BY_CHALLENGE",
+            "BLOCKED_BY_POLICY",
+            "CONFIRM_REQUIRED",
+            "INFO_NOT_ON_PAGE",
+            "UNCERTAIN",
+            "STUCK",
+            "ERROR_PAGE",
+            "BUDGET_EXHAUSTED",
+            "FAILED"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "question": {
+          "type": "string"
+        },
+        "details": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "session": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "snapshot": {
+          "type": "string"
+        },
+        "screenshot_path": {
+          "type": "string"
+        },
+        "trace": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "step": {
+                "type": "number"
+              },
+              "op": {
+                "type": "string"
+              },
+              "target": {
+                "type": "object",
+                "properties": {
+                  "role": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": ["role", "name"],
+                "additionalProperties": false
+              },
+              "coveredBy": {
+                "type": "object",
+                "properties": {
+                  "role": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": ["role", "name"],
+                "additionalProperties": false
+              },
+              "confidence": {
+                "type": "number"
+              },
+              "outcome": {
+                "type": "string",
+                "enum": [
+                  "changed",
+                  "unchanged",
+                  "stale",
+                  "covered",
+                  "disabled",
+                  "invisible",
+                  "not-editable",
+                  "unstable",
+                  "select-failed",
+                  "dialog-opened",
+                  "value-not-set",
+                  "not-focusable",
+                  "accepted",
+                  "dismissed"
+                ]
+              },
+              "drift": {
+                "type": "boolean"
+              },
+              "ms": {
+                "type": "number"
+              },
+              "waitMs": {
+                "type": "number"
+              },
+              "phases": {
+                "type": "object",
+                "properties": {
+                  "precheck": {
+                    "type": "integer"
+                  },
+                  "input": {
+                    "type": "integer"
+                  },
+                  "settle": {
+                    "type": "integer"
+                  },
+                  "wait": {
+                    "type": "integer"
+                  },
+                  "resolve": {
+                    "type": "integer"
+                  },
+                  "observe": {
+                    "type": "integer"
+                  },
+                  "frames": {
+                    "type": "integer"
+                  },
+                  "children": {
+                    "type": "integer"
+                  },
+                  "harness": {
+                    "type": "integer"
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "required": ["step", "op", "outcome", "ms"],
+            "additionalProperties": false
+          }
+        },
+        "timing": {
+          "type": "object",
+          "properties": {
+            "total": {
+              "type": "number"
+            },
+            "decide": {
+              "type": "number"
+            },
+            "browser": {
+              "type": "number"
+            },
+            "harness": {
+              "type": "number"
+            }
+          },
+          "required": ["total", "decide", "browser", "harness"],
+          "additionalProperties": false
+        },
+        "usage": {
+          "type": "object",
+          "properties": {
+            "decision_tokens": {
+              "type": "number"
+            },
+            "detail": {
+              "type": "object",
+              "properties": {
+                "call": {
+                  "type": "object",
+                  "properties": {
+                    "decisions": {
+                      "type": "integer"
+                    },
+                    "input_tokens": {
+                      "type": "number"
+                    },
+                    "output_tokens": {
+                      "type": "number"
+                    },
+                    "decide_ms": {
+                      "type": "integer"
+                    },
+                    "browser_ms": {
+                      "type": "integer"
+                    },
+                    "harness_ms": {
+                      "type": "integer"
+                    },
+                    "total_ms": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "decisions",
+                    "input_tokens",
+                    "output_tokens",
+                    "decide_ms",
+                    "browser_ms",
+                    "harness_ms",
+                    "total_ms"
+                  ],
+                  "additionalProperties": false
+                },
+                "session": {
+                  "type": "object",
+                  "properties": {
+                    "decisions": {
+                      "type": "integer"
+                    },
+                    "input_tokens": {
+                      "type": "number"
+                    },
+                    "output_tokens": {
+                      "type": "number"
+                    },
+                    "decide_ms": {
+                      "type": "integer"
+                    },
+                    "browser_ms": {
+                      "type": "integer"
+                    },
+                    "harness_ms": {
+                      "type": "integer"
+                    },
+                    "total_ms": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "decisions",
+                    "input_tokens",
+                    "output_tokens",
+                    "decide_ms",
+                    "browser_ms",
+                    "harness_ms",
+                    "total_ms"
+                  ],
+                  "additionalProperties": false
+                },
+                "provider": {
+                  "type": "string"
+                },
+                "model": {
+                  "type": "string"
+                }
+              },
+              "required": ["call", "session"],
+              "additionalProperties": false
+            }
+          },
+          "required": ["decision_tokens"],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "status",
+        "reason",
+        "question",
+        "session",
+        "url",
+        "title",
+        "snapshot",
+        "trace",
+        "timing",
+        "usage"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "browser_act",
+    "description": "Perform manual browser operations against current element refs in an existing session. Returns a fresh snapshot, so a separate browser_observe is not needed after it. The orchestrator rechecks targets and applies the same domain and irreversible-action gates.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Session ID returned by browser_run."
+        },
+        "ops": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "click",
+                  "type",
+                  "toggle",
+                  "select",
+                  "scroll",
+                  "back",
+                  "wait",
+                  "key",
+                  "dialog",
+                  "press_key",
+                  "hover",
+                  "drag",
+                  "upload",
+                  "wait_for"
+                ]
+              },
+              "ref": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Element ref from the latest observation for target actions."
+              },
+              "value_key": {
+                "$ref": "#/properties/ops/items/properties/ref",
+                "description": "Key in session values for type or prompt actions."
+              },
+              "text": {
+                "type": "string"
+              },
+              "submit": {
+                "type": "boolean"
+              },
+              "to_ref": {
+                "$ref": "#/properties/ops/items/properties/ref"
+              },
+              "paths": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/properties/ops/items/properties/ref"
+                }
+              },
+              "condition": {
+                "type": "string",
+                "enum": ["appears", "disappears"]
+              },
+              "timeout_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 30000
+              },
+              "delay_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "option_label": {
+                "type": "string"
+              },
+              "direction": {
+                "type": "string",
+                "enum": ["up", "down"]
+              },
+              "name": {
+                "type": "string",
+                "description": "Key to press for key or press_key, e.g. Enter, Tab, Escape."
+              },
+              "key": {
+                "type": "string",
+                "description": "Alias of name for key or press_key."
+              },
+              "accept": {
+                "type": "boolean"
+              }
+            },
+            "required": ["action"],
+            "additionalProperties": false
+          },
+          "minItems": 1
+        },
+        "allow_irreversible": {
+          "type": "boolean"
+        }
+      },
+      "required": ["session", "ops"],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "RUNNING",
+            "DONE_VERIFIED",
+            "DONE_UNVERIFIED",
+            "NEEDS_VALUES",
+            "NEEDS_LOGIN",
+            "BLOCKED_BY_CHALLENGE",
+            "BLOCKED_BY_POLICY",
+            "CONFIRM_REQUIRED",
+            "INFO_NOT_ON_PAGE",
+            "UNCERTAIN",
+            "STUCK",
+            "ERROR_PAGE",
+            "BUDGET_EXHAUSTED",
+            "FAILED"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "question": {
+          "type": "string"
+        },
+        "details": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "session": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "snapshot": {
+          "type": "string"
+        },
+        "screenshot_path": {
+          "type": "string"
+        },
+        "trace": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "step": {
+                "type": "number"
+              },
+              "op": {
+                "type": "string"
+              },
+              "target": {
+                "type": "object",
+                "properties": {
+                  "role": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": ["role", "name"],
+                "additionalProperties": false
+              },
+              "coveredBy": {
+                "type": "object",
+                "properties": {
+                  "role": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": ["role", "name"],
+                "additionalProperties": false
+              },
+              "confidence": {
+                "type": "number"
+              },
+              "outcome": {
+                "type": "string",
+                "enum": [
+                  "changed",
+                  "unchanged",
+                  "stale",
+                  "covered",
+                  "disabled",
+                  "invisible",
+                  "not-editable",
+                  "unstable",
+                  "select-failed",
+                  "dialog-opened",
+                  "value-not-set",
+                  "not-focusable",
+                  "accepted",
+                  "dismissed"
+                ]
+              },
+              "drift": {
+                "type": "boolean"
+              },
+              "ms": {
+                "type": "number"
+              },
+              "waitMs": {
+                "type": "number"
+              },
+              "phases": {
+                "type": "object",
+                "properties": {
+                  "precheck": {
+                    "type": "integer"
+                  },
+                  "input": {
+                    "type": "integer"
+                  },
+                  "settle": {
+                    "type": "integer"
+                  },
+                  "wait": {
+                    "type": "integer"
+                  },
+                  "resolve": {
+                    "type": "integer"
+                  },
+                  "observe": {
+                    "type": "integer"
+                  },
+                  "frames": {
+                    "type": "integer"
+                  },
+                  "children": {
+                    "type": "integer"
+                  },
+                  "harness": {
+                    "type": "integer"
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "required": ["step", "op", "outcome", "ms"],
+            "additionalProperties": false
+          }
+        },
+        "timing": {
+          "type": "object",
+          "properties": {
+            "total": {
+              "type": "number"
+            },
+            "decide": {
+              "type": "number"
+            },
+            "browser": {
+              "type": "number"
+            },
+            "harness": {
+              "type": "number"
+            }
+          },
+          "required": ["total", "decide", "browser", "harness"],
+          "additionalProperties": false
+        },
+        "usage": {
+          "type": "object",
+          "properties": {
+            "decision_tokens": {
+              "type": "number"
+            },
+            "detail": {
+              "type": "object",
+              "properties": {
+                "call": {
+                  "type": "object",
+                  "properties": {
+                    "decisions": {
+                      "type": "integer"
+                    },
+                    "input_tokens": {
+                      "type": "number"
+                    },
+                    "output_tokens": {
+                      "type": "number"
+                    },
+                    "decide_ms": {
+                      "type": "integer"
+                    },
+                    "browser_ms": {
+                      "type": "integer"
+                    },
+                    "harness_ms": {
+                      "type": "integer"
+                    },
+                    "total_ms": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "decisions",
+                    "input_tokens",
+                    "output_tokens",
+                    "decide_ms",
+                    "browser_ms",
+                    "harness_ms",
+                    "total_ms"
+                  ],
+                  "additionalProperties": false
+                },
+                "session": {
+                  "type": "object",
+                  "properties": {
+                    "decisions": {
+                      "type": "integer"
+                    },
+                    "input_tokens": {
+                      "type": "number"
+                    },
+                    "output_tokens": {
+                      "type": "number"
+                    },
+                    "decide_ms": {
+                      "type": "integer"
+                    },
+                    "browser_ms": {
+                      "type": "integer"
+                    },
+                    "harness_ms": {
+                      "type": "integer"
+                    },
+                    "total_ms": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "decisions",
+                    "input_tokens",
+                    "output_tokens",
+                    "decide_ms",
+                    "browser_ms",
+                    "harness_ms",
+                    "total_ms"
+                  ],
+                  "additionalProperties": false
+                },
+                "provider": {
+                  "type": "string"
+                },
+                "model": {
+                  "type": "string"
+                }
+              },
+              "required": ["call", "session"],
+              "additionalProperties": false
+            }
+          },
+          "required": ["decision_tokens"],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "status",
+        "reason",
+        "question",
+        "session",
+        "url",
+        "title",
+        "snapshot",
+        "trace",
+        "timing",
+        "usage"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "browser_navigate",
+    "description": "Navigate the selected session tab within its domain allowlist.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Session ID returned by browser_run."
+        },
+        "url": {
+          "type": "string",
+          "format": "uri"
+        }
+      },
+      "required": ["session", "url"],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "RUNNING",
+            "DONE_VERIFIED",
+            "DONE_UNVERIFIED",
+            "NEEDS_VALUES",
+            "NEEDS_LOGIN",
+            "BLOCKED_BY_CHALLENGE",
+            "BLOCKED_BY_POLICY",
+            "CONFIRM_REQUIRED",
+            "INFO_NOT_ON_PAGE",
+            "UNCERTAIN",
+            "STUCK",
+            "ERROR_PAGE",
+            "BUDGET_EXHAUSTED",
+            "FAILED"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "question": {
+          "type": "string"
+        },
+        "details": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "session": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "snapshot": {
+          "type": "string"
+        },
+        "screenshot_path": {
+          "type": "string"
+        },
+        "trace": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "step": {
+                "type": "number"
+              },
+              "op": {
+                "type": "string"
+              },
+              "target": {
+                "type": "object",
+                "properties": {
+                  "role": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": ["role", "name"],
+                "additionalProperties": false
+              },
+              "coveredBy": {
+                "type": "object",
+                "properties": {
+                  "role": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": ["role", "name"],
+                "additionalProperties": false
+              },
+              "confidence": {
+                "type": "number"
+              },
+              "outcome": {
+                "type": "string",
+                "enum": [
+                  "changed",
+                  "unchanged",
+                  "stale",
+                  "covered",
+                  "disabled",
+                  "invisible",
+                  "not-editable",
+                  "unstable",
+                  "select-failed",
+                  "dialog-opened",
+                  "value-not-set",
+                  "not-focusable",
+                  "accepted",
+                  "dismissed"
+                ]
+              },
+              "drift": {
+                "type": "boolean"
+              },
+              "ms": {
+                "type": "number"
+              },
+              "waitMs": {
+                "type": "number"
+              },
+              "phases": {
+                "type": "object",
+                "properties": {
+                  "precheck": {
+                    "type": "integer"
+                  },
+                  "input": {
+                    "type": "integer"
+                  },
+                  "settle": {
+                    "type": "integer"
+                  },
+                  "wait": {
+                    "type": "integer"
+                  },
+                  "resolve": {
+                    "type": "integer"
+                  },
+                  "observe": {
+                    "type": "integer"
+                  },
+                  "frames": {
+                    "type": "integer"
+                  },
+                  "children": {
+                    "type": "integer"
+                  },
+                  "harness": {
+                    "type": "integer"
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "required": ["step", "op", "outcome", "ms"],
+            "additionalProperties": false
+          }
+        },
+        "timing": {
+          "type": "object",
+          "properties": {
+            "total": {
+              "type": "number"
+            },
+            "decide": {
+              "type": "number"
+            },
+            "browser": {
+              "type": "number"
+            },
+            "harness": {
+              "type": "number"
+            }
+          },
+          "required": ["total", "decide", "browser", "harness"],
+          "additionalProperties": false
+        },
+        "usage": {
+          "type": "object",
+          "properties": {
+            "decision_tokens": {
+              "type": "number"
+            },
+            "detail": {
+              "type": "object",
+              "properties": {
+                "call": {
+                  "type": "object",
+                  "properties": {
+                    "decisions": {
+                      "type": "integer"
+                    },
+                    "input_tokens": {
+                      "type": "number"
+                    },
+                    "output_tokens": {
+                      "type": "number"
+                    },
+                    "decide_ms": {
+                      "type": "integer"
+                    },
+                    "browser_ms": {
+                      "type": "integer"
+                    },
+                    "harness_ms": {
+                      "type": "integer"
+                    },
+                    "total_ms": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "decisions",
+                    "input_tokens",
+                    "output_tokens",
+                    "decide_ms",
+                    "browser_ms",
+                    "harness_ms",
+                    "total_ms"
+                  ],
+                  "additionalProperties": false
+                },
+                "session": {
+                  "type": "object",
+                  "properties": {
+                    "decisions": {
+                      "type": "integer"
+                    },
+                    "input_tokens": {
+                      "type": "number"
+                    },
+                    "output_tokens": {
+                      "type": "number"
+                    },
+                    "decide_ms": {
+                      "type": "integer"
+                    },
+                    "browser_ms": {
+                      "type": "integer"
+                    },
+                    "harness_ms": {
+                      "type": "integer"
+                    },
+                    "total_ms": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "decisions",
+                    "input_tokens",
+                    "output_tokens",
+                    "decide_ms",
+                    "browser_ms",
+                    "harness_ms",
+                    "total_ms"
+                  ],
+                  "additionalProperties": false
+                },
+                "provider": {
+                  "type": "string"
+                },
+                "model": {
+                  "type": "string"
+                }
+              },
+              "required": ["call", "session"],
+              "additionalProperties": false
+            }
+          },
+          "required": ["decision_tokens"],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "status",
+        "reason",
+        "question",
+        "session",
+        "url",
+        "title",
+        "snapshot",
+        "trace",
+        "timing",
+        "usage"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "browser_tabs",
+    "description": "List, select, or close tabs owned by a browser session.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Session ID returned by browser_run."
+        },
+        "action": {
+          "type": "string",
+          "enum": ["list", "select", "close"]
+        },
+        "tab_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": ["session", "action"],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "type": "string"
+        },
+        "tabs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "tab_id": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              },
+              "selected": {
+                "type": "boolean"
+              }
+            },
+            "required": ["tab_id", "url", "selected"],
+            "additionalProperties": false
+          }
+        },
+        "closed": {
+          "type": "boolean"
+        },
+        "status": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": ["session"],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "browser_close",
+    "description": "Close a browser session and its tab, and delete its temporary handoff files. The shared browser remains available for other sessions.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Session ID returned by browser_run."
+        }
+      },
+      "required": ["session"],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "type": "string"
+        },
+        "closed": {
+          "type": "boolean",
+          "const": true
+        }
+      },
+      "required": ["session", "closed"],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "jev_decide",
+    "description": "Pass a state and typed questions directly to the configured decision port. This does not create or change a browser session.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "state": {},
+        "questions": {
+          "type": "object",
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "choice"
+                  },
+                  "instructions": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "object",
+                        "additionalProperties": {}
+                      },
+                      {
+                        "type": "array",
+                        "items": {}
+                      }
+                    ]
+                  },
+                  "criteria": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": {}
+                        },
+                        {
+                          "type": "array",
+                          "items": {}
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "required": ["type", "instructions", "criteria"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "score"
+                  },
+                  "instructions": {
+                    "$ref": "#/properties/questions/additionalProperties/anyOf/0/properties/instructions"
+                  },
+                  "criteria": {
+                    "type": "array",
+                    "items": {}
+                  }
+                },
+                "required": ["type", "instructions", "criteria"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "const": "noul"
+                  },
+                  "instructions": {
+                    "$ref": "#/properties/questions/additionalProperties/anyOf/0/properties/instructions"
+                  },
+                  "criteria": {
+                    "type": "object",
+                    "additionalProperties": {}
+                  }
+                },
+                "required": ["type", "instructions"],
+                "additionalProperties": false
+              }
+            ]
+          }
+        }
+      },
+      "required": ["questions"],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "answers": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "usage": {
+          "type": "object",
+          "properties": {
+            "inputTokens": {
+              "type": "number"
+            },
+            "outputTokens": {
+              "type": "number"
+            }
+          },
+          "required": ["inputTokens", "outputTokens"],
+          "additionalProperties": false
+        },
+        "model": {
+          "type": "string"
+        },
+        "latency_ms": {
+          "type": "number"
+        }
+      },
+      "required": ["answers", "usage", "model", "latency_ms"],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  }
+]
