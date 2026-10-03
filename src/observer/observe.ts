@@ -1,5 +1,6 @@
 import type { PageHandle } from "../engine/types.ts";
 import { pageSnapshot, waitForNavigationQuiet } from "./page-snapshot.ts";
+import { adFrameRules } from "../util/ad-frames.ts";
 import { installObserverLibrary } from "./page-library.ts";
 import { FrameGoneError, PageUnresponsiveError } from "../engine/types.ts";
 import { mapFrameRect } from "./frame-geometry.ts";
@@ -217,6 +218,7 @@ export async function observe(
       ...(options.goal ? { textScanChars: Math.max(60_000, options.maxTextChars ?? 1500) } : {}),
       belowFoldScreens: options.belowFoldScreens ?? 1,
       traverseFrames: !page.capabilities.crossOriginFrames,
+      adFrameRules,
       ...(options.markerSelectors ? { markerSelectors: options.markerSelectors } : {}),
     },
   ]);
@@ -227,7 +229,7 @@ export async function observe(
   if (page.capabilities.crossOriginFrames) {
     const budget = Math.max(1, options.frameTimeoutMs ?? 1000);
     const framesStarted = performance.now();
-    const frames = await page.frames({ timeoutMs: budget });
+    const frames = await page.frames({ timeoutMs: budget, skipAdFrames: true });
     framesSkipped += frames.framesSkipped ?? 0;
     framesMs = performance.now() - framesStarted;
     const frameHashes: string[] = [];
@@ -247,6 +249,7 @@ export async function observe(
                     maxTextChars: options.maxTextChars ?? 1500,
                     belowFoldScreens: options.belowFoldScreens ?? 1,
                     traverseFrames: false,
+                    adFrameRules,
                     ...(options.markerSelectors
                       ? { markerSelectors: options.markerSelectors }
                       : {}),

@@ -2,6 +2,20 @@
 
 This project follows Keep a Changelog. Versions use Semantic Versioning.
 
+## [0.2.2] - 2026-10-03
+
+Faster observations on long pages and ad-heavy pages; ad frames are no longer observed.
+
+### Changed
+
+- Observations skip ad frames: frames named by Google Publisher Tag or AdSense (`google_ads_iframe_…`, `aswift_…`), empty ad and consent plumbing frames, frames from a short list of ad-serving hosts, and frames nested in them are neither observed nor offered as candidates, and ad rotation no longer changes the page hash. Nothing else on the page is filtered, and every other operation (targets, success checks) still sees these frames. On an ad-heavy dictionary page a cold observation went from about 5.5 s to about 0.1 s. Ad frames are recognised as soon as they attach or navigate, so an observation does not wait for them to be set up.
+
+### Fixed
+
+- A frame that went away while it was still being set up (ad refreshes do this constantly) no longer makes every observation wait up to 1 s for it, and no longer holds other frame lookups until its CDP timeout. On an ad-heavy page the observations in the first seconds after loading went from 1.0–2.4 s to under 0.1 s.
+
+- Observing a long page no longer takes seconds: the text of an element's container is read only until enough has been collected, instead of checking the visibility of every text node in the container for every element. On a long wiki article an observation went from about 5 s to about 0.2–0.6 s; what is observed is unchanged.
+
 ## [0.2.1] - 2026-10-03
 
 Fixes for the confirmed findings of an external code review (issues #4–#14).

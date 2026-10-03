@@ -42,6 +42,7 @@ describe("real Chrome page Observer", { skip: skipped }, () => {
     const namesHtml = await readFile(join(fixtures, "m6a-names.html"), "utf8");
     const storiesHtml = await readFile(join(fixtures, "m6a-stories.html"), "utf8");
     const m6wHtml = await readFile(join(fixtures, "m6w-icons.html"), "utf8");
+    const adFramesHtml = await readFile(join(fixtures, "ad-frames.html"), "utf8");
     cross = createServer((request, response) => {
       // Without a charset, zh-CN Chrome decodes as GBK and the Chinese label becomes mojibake.
       response.setHeader("content-type", "text/html; charset=utf-8");
@@ -65,6 +66,7 @@ describe("real Chrome page Observer", { skip: skipped }, () => {
       if (request.url === "/frame")
         response.end('<form><label>框内字段<input id="frame-field"></label></form>');
       else if (request.url === "/long") response.end(longHtml);
+      else if (request.url === "/ad-frames") response.end(adFramesHtml);
       else if (request.url === "/products") response.end(cardsHtml);
       else if (request.url === "/article-deep") response.end(articleHtml);
       else if (request.url === "/shadow-content") response.end(shadowHtml);
@@ -108,6 +110,16 @@ describe("real Chrome page Observer", { skip: skipped }, () => {
       await page.close();
     }
   }
+  test("R12: Chrome observation skips the ad iframe and includes the normal iframe", async () => {
+    await withPage("/ad-frames", async (page) => {
+      const state = await observe(page);
+      assert.ok(
+        state.elements.some((element) => element.role === "link" && element.name === "Continue"),
+      );
+      assert.ok(!state.elements.some((element) => element.name === "Buy now"));
+      assert.equal(state.timings.framesSkipped ?? 0, 0);
+    });
+  });
   test("M6a: every observed ref resolves ok immediately after observe", async () => {
     for (const path of ["/products", "/m6a-stories", "/", "/shadow-content", "/m6a-names"]) {
       await withPage(path, async (page) => {

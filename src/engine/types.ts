@@ -115,7 +115,10 @@ export interface PageHandle {
     searchbox: boolean,
   ): Promise<boolean>;
   screenshot(options?: { quality?: number }): Promise<Uint8Array>;
-  frames(options?: { timeoutMs?: number }): Promise<FrameHandle[] & { framesSkipped?: number }>;
+  frames(options?: {
+    timeoutMs?: number;
+    skipAdFrames?: boolean;
+  }): Promise<FrameHandle[] & { framesSkipped?: number }>;
   handleDialog(accept: boolean, promptText?: string): Promise<void>;
   waitForDownload(
     predicate?: (event: PageEvents["download"]) => boolean,

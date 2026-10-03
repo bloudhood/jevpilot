@@ -62,33 +62,42 @@ export function installObserverLibrary(): void {
     }
     return true;
   };
-  const walkComposed = (root: Node, visitNode: (node: Node) => void): void => {
-    const visitTree = (node: Node): void => {
-      visitNode(node);
+  const walkComposed = (root: Node, visitNode: (node: Node) => boolean | void): boolean => {
+    const visitTree = (node: Node): boolean => {
+      if (visitNode(node) === true) return true;
       if (node.nodeType === 1 && (node as Element).shadowRoot)
-        walkComposed((node as Element).shadowRoot!, visitNode);
+        return walkComposed((node as Element).shadowRoot!, visitNode);
       else if (node.nodeType === 1 && (node as Element).localName === "slot") {
         const slot = node as HTMLSlotElement;
         const assigned = slot.assignedNodes();
-        for (const item of assigned.length ? assigned : [...node.childNodes]) visitTree(item);
-      } else for (const item of node.childNodes ?? []) visitTree(item);
+        for (const item of assigned.length ? assigned : [...node.childNodes])
+          if (visitTree(item)) return true;
+      } else for (const item of node.childNodes ?? []) if (visitTree(item)) return true;
+      return false;
     };
     const container =
       root.nodeType === 1 && (root as Element).shadowRoot ? (root as Element).shadowRoot! : root;
-    for (const child of container.childNodes ?? []) visitTree(child);
+    for (const child of container.childNodes ?? []) if (visitTree(child)) return true;
+    return false;
   };
   const composedText = (root: Node, limit: number, skip?: (node: Text) => boolean): string => {
     const fixtureTextNodes = (root as Node & { textNodes?: string[] }).textNodes;
     if (Array.isArray(fixtureTextNodes)) return clean(fixtureTextNodes.join(" "), limit);
     if (!root.childNodes?.length) return clean(root.textContent, limit);
     const parts: string[] = [];
+    let length = 0;
     walkComposed(root, (node) => {
+      if (length >= limit) return true;
       if (node.nodeType !== 3 || (skip && skip(node as Text))) return;
       const parent = node.parentElement;
       if (!parent || parent.closest("script, style, noscript, svg title")) return;
       if (!visible(parent, rectOf(parent))) return;
-      const part = clean(node.textContent, Math.max(0, limit - parts.join(" ").length));
-      if (part) parts.push(part);
+      const part = clean(node.textContent, Math.max(0, limit - length));
+      if (part) {
+        length += part.length + (parts.length ? 1 : 0);
+        parts.push(part);
+      }
+      return length >= limit;
     });
     return clean(parts.join(" "), limit);
   };

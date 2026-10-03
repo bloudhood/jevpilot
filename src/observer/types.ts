@@ -91,6 +91,7 @@ export type Observation = {
   };
 };
 export type SnapshotOptions = {
+  adFrameRules?: typeof import("../util/ad-frames.ts").adFrameRules;
   maxTextChars: number;
   textScanChars?: number;
   belowFoldScreens?: number;

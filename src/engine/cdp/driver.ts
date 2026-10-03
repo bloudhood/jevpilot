@@ -1,6 +1,7 @@
 import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
+import { isAdFrame } from "../../util/ad-frames.ts";
 import {
   blockedAddress,
   checkUrl,
@@ -171,7 +172,9 @@ class CdpPageHandle implements PageHandle {
   private readonly inProcessFrames = new Map<string, { sessionId: string; world: IsolatedWorld }>();
   private readonly subscriptions: (() => void)[] = [];
   private readonly frameSubscriptions = new Map<string, (() => void)[]>();
-  private readonly frameSetups = new Set<Promise<void>>();
+  private readonly frameSetups = new Map<Promise<void>, string>();
+  private readonly knownAdFrames = new Set<string>();
+  private readonly knownFrames = new Map<string, { sessionId: string; parentId?: string }>();
   private readonly pendingFrameSessions = new Set<string>();
   private pendingDialog: PageEvents["dialog"] | undefined;
   private pendingDialogSessionId: string | undefined;
@@ -231,8 +234,16 @@ class CdpPageHandle implements PageHandle {
         "Page.frameNavigated",
         (value) => {
           const event = value as {
-            frame?: { url?: string; id?: string; parentId?: string; loaderId?: string };
+            frame?: {
+              url?: string;
+              name?: string;
+              id?: string;
+              parentId?: string;
+              loaderId?: string;
+            };
           };
+          if (event.frame?.id)
+            this.rememberFrame({ ...event.frame, id: event.frame.id }, session.sessionId);
           if (event.frame && !event.frame.parentId) {
             this.mainFrameId = event.frame.id;
             if (event.frame.url) this.onFrameNavigated(event.frame.url, event.frame.loaderId);
@@ -320,9 +331,18 @@ class CdpPageHandle implements PageHandle {
         (value) => {
           const event = value as {
             sessionId: string;
-            targetInfo: { targetId: string; type: string };
+            targetInfo: { targetId: string; type: string; url?: string; parentFrameId?: string };
           };
           if (event.targetInfo.type === "iframe") {
+            this.rememberFrame(
+              {
+                id: event.targetInfo.targetId,
+                url: event.targetInfo.url,
+                parentId: event.targetInfo.parentFrameId,
+              },
+              event.sessionId,
+              false,
+            );
             const setup = this.attachFrame(
               event.sessionId,
               event.targetInfo.targetId,
@@ -345,6 +365,13 @@ class CdpPageHandle implements PageHandle {
           const event = value as { sessionId: string };
           this.detachFrame(event.sessionId);
         },
+        session.sessionId,
+      ),
+    );
+    this.subscriptions.push(
+      client.on(
+        "Page.frameDetached",
+        (value) => this.forgetFrame((value as { frameId: string }).frameId),
         session.sessionId,
       ),
     );
@@ -465,7 +492,7 @@ class CdpPageHandle implements PageHandle {
   }
 
   private trackFrameSetup(setup: Promise<void>, sessionId: string): void {
-    this.frameSetups.add(setup);
+    this.frameSetups.set(setup, sessionId);
     this.pendingFrameSessions.add(sessionId);
     void setup.then(
       () => {
@@ -477,6 +504,54 @@ class CdpPageHandle implements PageHandle {
         this.pendingFrameSessions.delete(sessionId);
       },
     );
+  }
+
+  private rememberFrame(
+    frame: {
+      id: string;
+      parentId?: string | undefined;
+      name?: string | undefined;
+      url?: string | undefined;
+    },
+    sessionId: string,
+    // A Page.Frame (navigation event or frame tree) carries the frame's current name and URL, so it
+    // can also clear an earlier classification; an attach event only has the target URL.
+    complete = true,
+  ): void {
+    const parentId = frame.parentId ?? this.knownFrames.get(frame.id)?.parentId;
+    this.knownFrames.set(frame.id, {
+      sessionId: this.children.get(frame.id)?.sessionId ?? sessionId,
+      ...(parentId ? { parentId } : {}),
+    });
+    if ((sessionId !== this.session.sessionId || parentId) && frame.id !== this.mainFrameId) {
+      if (isAdFrame(frame.name, frame.url)) this.knownAdFrames.add(frame.id);
+      else if (complete) this.knownAdFrames.delete(frame.id);
+    }
+  }
+
+  private isKnownAdFrame(frameId: string, visited = new Set<string>()): boolean {
+    if (visited.has(frameId)) return false;
+    visited.add(frameId);
+    if (this.knownAdFrames.has(frameId)) return true;
+    const parentId = this.knownFrames.get(frameId)?.parentId;
+    if (parentId && this.isKnownAdFrame(parentId, visited)) return true;
+    const parentSessionId = this.children.get(frameId)?.parentSessionId;
+    for (const [id, child] of this.children)
+      if (child.sessionId === parentSessionId && this.isKnownAdFrame(id, visited)) return true;
+    return false;
+  }
+
+  private isAdSession(sessionId: string): boolean {
+    for (const [id, child] of this.children)
+      if (child.sessionId === sessionId) return this.isKnownAdFrame(id);
+    return false;
+  }
+
+  private forgetFrame(frameId: string): void {
+    this.knownAdFrames.delete(frameId);
+    this.knownFrames.delete(frameId);
+    for (const [id, frame] of this.knownFrames)
+      if (frame.parentId === frameId) this.forgetFrame(id);
   }
 
   private onDialogOpening(value: unknown, sessionId: string): void {
@@ -510,6 +585,12 @@ class CdpPageHandle implements PageHandle {
   }
 
   private detachFrame(sessionId: string): void {
+    for (const [id, frame] of this.knownFrames)
+      if (frame.sessionId === sessionId) this.forgetFrame(id);
+    // A setup of a frame that went away can only end with its CDP timeout; frames() must not wait for it.
+    for (const [setup, setupSessionId] of this.frameSetups)
+      if (setupSessionId === sessionId) this.frameSetups.delete(setup);
+    this.pendingFrameSessions.delete(sessionId);
     // Chrome dismisses a dialog whose frame goes away, and no answer can reach a session that is gone,
     // so a dialog kept for it would block every later call on this page.
     if (this.pendingDialogSessionId === sessionId) {
@@ -539,9 +620,18 @@ class CdpPageHandle implements PageHandle {
       (value) => {
         const event = value as {
           sessionId: string;
-          targetInfo: { targetId: string; type: string };
+          targetInfo: { targetId: string; type: string; url?: string; parentFrameId?: string };
         };
         if (event.targetInfo.type === "iframe") {
+          this.rememberFrame(
+            {
+              id: event.targetInfo.targetId,
+              url: event.targetInfo.url,
+              parentId: event.targetInfo.parentFrameId,
+            },
+            event.sessionId,
+            false,
+          );
           const setup = this.attachFrame(event.sessionId, event.targetInfo.targetId, sessionId);
           this.trackFrameSetup(setup, event.sessionId);
           void setup.catch((cause: unknown) => {
@@ -564,7 +654,22 @@ class CdpPageHandle implements PageHandle {
       (value) => this.onDialogOpening(value, sessionId),
       sessionId,
     );
-    this.frameSubscriptions.set(sessionId, [attached, detached, dialog]);
+    const navigated = this.browser.client.on(
+      "Page.frameNavigated",
+      (value) =>
+        this.rememberFrame(
+          (value as { frame: { id: string; parentId?: string; name?: string; url?: string } })
+            .frame,
+          sessionId,
+        ),
+      sessionId,
+    );
+    const frameDetached = this.browser.client.on(
+      "Page.frameDetached",
+      (value) => this.forgetFrame((value as { frameId: string }).frameId),
+      sessionId,
+    );
+    this.frameSubscriptions.set(sessionId, [attached, detached, dialog, navigated, frameDetached]);
     await this.browser.client.call("Page.enable", {}, sessionId);
     const response = this.browser.client.on(
       "Network.responseReceived",
@@ -683,7 +788,7 @@ class CdpPageHandle implements PageHandle {
   }
 
   async frames(
-    options: { timeoutMs?: number } = {},
+    options: { timeoutMs?: number; skipAdFrames?: boolean } = {},
   ): Promise<FrameHandle[] & { framesSkipped?: number }> {
     this.ensureUnblocked();
     const hasBudget = options.timeoutMs !== undefined;
@@ -712,29 +817,38 @@ class CdpPageHandle implements PageHandle {
         Object.defineProperty(frames, "framesSkipped", { value: skipped.size });
       return frames;
     };
+    const pendingSetups = () =>
+      [...this.frameSetups]
+        .filter(([, sessionId]) => !options.skipAdFrames || !this.isAdSession(sessionId))
+        .map(([setup]) => setup);
     if (options.timeoutMs === undefined) {
-      while (this.frameSetups.size > 0) await Promise.allSettled([...this.frameSetups]);
-    } else if (this.frameSetups.size > 0) {
+      while (pendingSetups().length > 0) await Promise.allSettled(pendingSetups());
+    } else if (pendingSetups().length > 0) {
       try {
-        await bounded(() => Promise.allSettled([...this.frameSetups]));
+        await bounded(() => Promise.allSettled(pendingSetups()));
       } catch (error) {
         if (!(error instanceof CdpTimeoutError)) throw error;
       }
     }
-    type FrameNode = { frame: { id: string; parentId?: string }; childFrames?: FrameNode[] };
+    type FrameNode = {
+      frame: { id: string; parentId?: string; name?: string; url?: string };
+      childFrames?: FrameNode[];
+    };
     const trees: { sessionId: string; frameTree: FrameNode }[] = [];
     const roots = new Map<string, string>();
     const parents = new Map<string, string>();
     const visible = new Set<string>();
     const busySessions = new Set<string>();
+    const adFrames = new Set<string>();
     const sessions = [
       this.session.sessionId,
-      ...[...this.children.values()]
+      ...[...this.children.entries()]
         .filter(
-          (child) =>
-            options.timeoutMs === undefined || !this.pendingFrameSessions.has(child.sessionId),
+          ([id, child]) =>
+            (!options.skipAdFrames || !this.isKnownAdFrame(id)) &&
+            (options.timeoutMs === undefined || !this.pendingFrameSessions.has(child.sessionId)),
         )
-        .map((child) => child.sessionId),
+        .map(([, child]) => child.sessionId),
     ];
     const queryTree = async (sessionId: string): Promise<void> => {
       let tree;
@@ -766,6 +880,7 @@ class CdpPageHandle implements PageHandle {
       if (tree.frameTree.frame.parentId)
         parents.set(tree.frameTree.frame.id, tree.frameTree.frame.parentId);
       const walk = (node: FrameNode, parentId?: string): void => {
+        this.rememberFrame({ ...node.frame, parentId: parentId ?? node.frame.parentId }, sessionId);
         if (parentId) {
           visible.add(node.frame.id);
           parents.set(node.frame.id, parentId);
@@ -779,6 +894,28 @@ class CdpPageHandle implements PageHandle {
     } else {
       await Promise.all(sessions.map(queryTree));
       if (!roots.has(this.session.sessionId)) return finish();
+    }
+    if (options.skipAdFrames) {
+      const scan = (node: FrameNode): void => {
+        if (
+          node.frame.id !== roots.get(this.session.sessionId) &&
+          this.isKnownAdFrame(node.frame.id)
+        )
+          adFrames.add(node.frame.id);
+        for (const child of node.childFrames ?? []) scan(child);
+      };
+      for (const { frameTree } of trees) scan(frameTree);
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const [id, parentId] of parents) {
+          if (adFrames.has(parentId) && !adFrames.has(id)) {
+            adFrames.add(id);
+            changed = true;
+          }
+        }
+      }
+      for (const id of adFrames) skipped.delete(id);
     }
     for (const [frameId, entry] of this.inProcessFrames) {
       if (busySessions.has(entry.sessionId)) continue;
@@ -794,8 +931,10 @@ class CdpPageHandle implements PageHandle {
     const setupTasks: Promise<void>[] = [];
     for (const { sessionId, frameTree } of trees) {
       const walk = async (node: FrameNode): Promise<void> => {
+        if (adFrames.has(node.frame.id)) return;
         const setupChild = async (child: FrameNode): Promise<void> => {
           const id = child.frame.id;
+          if (adFrames.has(id)) return;
           if (!this.children.has(id) && !this.inProcessFrames.has(id)) {
             const world = new IsolatedWorld(this.browser.client, sessionId, "jevpilot", id);
             try {
@@ -805,6 +944,7 @@ class CdpPageHandle implements PageHandle {
               world.dispose();
               if (hasBudget && cause instanceof CdpTimeoutError) {
                 const markSkipped = (node: FrameNode): void => {
+                  if (adFrames.has(node.frame.id)) return;
                   skipped.add(node.frame.id);
                   for (const descendant of node.childFrames ?? []) markSkipped(descendant);
                 };
@@ -923,6 +1063,7 @@ class CdpPageHandle implements PageHandle {
       id: string,
       child: { sessionId: string; world: IsolatedWorld },
     ): Promise<void> => {
+      if (adFrames.has(id) || (options.skipAdFrames && this.isKnownAdFrame(id))) return;
       if (options.timeoutMs !== undefined && this.pendingFrameSessions.has(child.sessionId)) return;
       const ownerSessionId =
         this.children.get(id)?.parentSessionId ?? this.inProcessFrames.get(id)?.sessionId;
@@ -1181,6 +1322,8 @@ class CdpPageHandle implements PageHandle {
     this.children.clear();
     for (const frame of this.inProcessFrames.values()) frame.world.dispose();
     this.inProcessFrames.clear();
+    this.knownAdFrames.clear();
+    this.knownFrames.clear();
     try {
       await this.session.close();
     } finally {

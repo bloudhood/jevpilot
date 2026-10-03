@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { adFrameRules, isAdFrame } from "../../src/util/ad-frames.ts";
+import type { SnapshotOptions } from "../../src/observer/types.ts";
 import { describe, test } from "node:test";
 import { runInNewContext } from "node:vm";
 import { estimateTokens } from "../../src/decision/limits.ts";
@@ -18,7 +20,10 @@ import {
   resolveRef,
   resolveRefInPage,
 } from "../../src/observer/page-snapshot.ts";
-import { installObserverLibrary } from "../../src/observer/page-library.ts";
+import {
+  installObserverLibrary,
+  type ObserverPageLibrary,
+} from "../../src/observer/page-library.ts";
 import type { Observation, ObservedElement } from "../../src/observer/types.ts";
 import { FakePageHandle } from "../support/fake-engine.ts";
 import { PageUnresponsiveError, type FrameHandle } from "../../src/engine/types.ts";
@@ -338,7 +343,10 @@ function fakeDomElement(
   return element;
 }
 
-function snapshotInFakePage(elements: Record<string, unknown>[]): ReturnType<typeof pageSnapshot> {
+function snapshotInFakePage(
+  elements: Record<string, unknown>[],
+  options: SnapshotOptions = { maxTextChars: 100 },
+): ReturnType<typeof pageSnapshot> {
   const document = {
     title: "Test",
     readyState: "complete",
@@ -360,6 +368,8 @@ function snapshotInFakePage(elements: Record<string, unknown>[]): ReturnType<typ
   for (const element of elements) element.ownerDocument = document;
   const context = {
     window: { innerWidth: 800, innerHeight: 600 },
+    innerWidth: 800,
+    innerHeight: 600,
     document,
     location: { href: "https://example.test/" },
     scrollX: 0,
@@ -381,8 +391,146 @@ function snapshotInFakePage(elements: Record<string, unknown>[]): ReturnType<typ
   };
   runInNewContext(`(${installObserverLibrary.toString()})()`, context);
   const snapshot = runInNewContext(`(${pageSnapshot.toString()})`, context) as typeof pageSnapshot;
-  return snapshot({ maxTextChars: 100 });
+  return snapshot(options);
 }
+
+test("R12: ad host matching uses host labels and never matches functional hosts", () => {
+  for (const host of adFrameRules.hosts) {
+    assert.equal(isAdFrame(undefined, `https://${host}/ad`), true, host);
+    assert.equal(isAdFrame(undefined, `https://x.${host}/ad`), true, host);
+    assert.equal(isAdFrame(undefined, `https://not${host}/ad`), false, host);
+    assert.equal(isAdFrame(undefined, `https://${host}.example.org/ad`), false, host);
+  }
+  assert.equal(isAdFrame(undefined, "https://adservice.google.com/"), true);
+  for (const host of [
+    "x.adservice.google.com",
+    "google.com",
+    "accounts.google.com",
+    "www.google.com",
+    "gstatic.com",
+    "www.gstatic.com",
+    "recaptcha.net",
+    "www.recaptcha.net",
+    "youtube.com",
+    "www.youtube.com",
+    "hcaptcha.com",
+    "js.hcaptcha.com",
+    "challenges.cloudflare.com",
+    "stripe.com",
+    "checkout.stripe.com",
+    "paypal.com",
+    "www.paypal.com",
+    "login.example.com",
+    "account.example.com",
+  ]) {
+    assert.equal(isAdFrame(undefined, `https://${host}/`), false, host);
+  }
+  for (const name of [...adFrameRules.names, "google_ads_iframe_/1/x", "aswift_1"])
+    assert.equal(isAdFrame(name, "about:blank"), true);
+  assert.equal(isAdFrame("div-gpt-ad", "about:blank"), false);
+  assert.equal(isAdFrame(undefined, "invalid URL"), false);
+});
+
+test("R12: an ad iframe is not offered as a frame candidate but stays in the iframe markers", () => {
+  let traversals = 0;
+  const ads = [
+    Object.assign(fakeDomElement("iframe", {}), {
+      name: "google_ads_iframe_/1/x",
+      src: "about:blank",
+    }),
+    Object.assign(fakeDomElement("iframe", {}), { name: "__uspapiLocator", src: "" }),
+    Object.assign(fakeDomElement("iframe", { id: "aswift_1" }), {
+      name: "publisher-name",
+      src: "about:blank",
+    }),
+    Object.assign(fakeDomElement("iframe", {}), {
+      name: "",
+      src: "https://tpc.googlesyndication.com/ad",
+    }),
+  ];
+  for (const ad of ads)
+    Object.defineProperty(ad, "contentDocument", {
+      get() {
+        traversals++;
+        throw new Error("must not traverse ad");
+      },
+    });
+  const normal = Object.assign(fakeDomElement("iframe", {}), {
+    name: "payment",
+    src: "https://checkout.stripe.com/",
+  });
+  for (const traverseFrames of [true, false]) {
+    const snapshot = snapshotInFakePage([...ads, normal], {
+      maxTextChars: 100,
+      traverseFrames,
+      adFrameRules,
+    });
+    assert.deepEqual(
+      Array.from(snapshot.elements, (item) => [item.role, item.name]),
+      [["frame", "https://checkout.stripe.com"]],
+    );
+    assert.deepEqual(
+      Array.from(snapshot.signals.markers!.iframes, (item) => item.url),
+      [...ads, normal].map((item) => item.src || "about:blank"),
+    );
+  }
+  assert.equal(traversals, 0);
+});
+
+function adObservationPage(rotation: string) {
+  const { timings: _timings, ...main } = observation([]);
+  const { timings: _childTimings, ...child } = observation([element(1, "Continue")]);
+  const page = new FakePageHandle(main);
+  const calls: string[] = [];
+  const nodes = [
+    { id: "named-ad", name: "google_ads_iframe_/1/x", url: "about:blank" },
+    { id: "host-ad", name: "", url: "https://tpc.googlesyndication.com/ad" },
+    { id: "nested", name: "normal", url: "https://example.org/", parentId: "named-ad" },
+    { id: "payment", name: "normal", url: "https://checkout.stripe.com/" },
+  ];
+  page.frames = async (options?: { timeoutMs?: number; skipAdFrames?: boolean }) => {
+    assert.equal(options?.skipAdFrames, true);
+    const ads = new Set(
+      nodes.filter((node) => isAdFrame(node.name, node.url)).map((node) => node.id),
+    );
+    return nodes
+      .filter((node) => !ads.has(node.id) && !ads.has(node.parentId ?? ""))
+      .map((node): FrameHandle => ({
+        id: node.id,
+        offset: { x: 0, y: 0 },
+        async callIsolated(fn) {
+          calls.push(node.id);
+          return (
+            fn.name === "installObserverLibrary"
+              ? undefined
+              : {
+                  ...child,
+                  pageHash: node.id === "payment" ? "stable" : rotation,
+                  elements: node.id === "payment" ? child.elements : [element(1, "Buy now")],
+                }
+          ) as never;
+        },
+      }));
+  };
+  return { page, calls };
+}
+
+test("R12: ad frames are not observed and never become candidates", async () => {
+  const { page, calls } = adObservationPage("ad-one");
+  const state = await observe(page);
+  assert.deepEqual(
+    state.elements.map((item) => item.name),
+    ["Continue"],
+  );
+  assert.deepEqual(calls, ["payment", "payment"]);
+  assert.equal(state.timings.framesSkipped ?? 0, 0);
+});
+
+test("R12: ad rotation inside an ad frame does not change pageHash", async () => {
+  const before = await observe(adObservationPage("ad-one").page);
+  const after = await observe(adObservationPage("ad-two").page);
+  assert.equal(before.pageHash, after.pageHash);
+});
 
 describe("observer selection", () => {
   test("goal-ranked text includes a late fact only for a matching goal", () => {
@@ -1056,6 +1204,232 @@ test("R9: the page query names only the current field's form-owner submit contro
   field.isConnected = false;
   assert.deepEqual(Array.from(names(3, "e1")), []);
 });
+
+test("R11: composedText stops checking visibility once it has its text", () => {
+  for (const shadow of [false, true]) {
+    let styleChecks = 0;
+    const library = composedTestLibrary(() => styleChecks++);
+    const root = composedElement(
+      Array.from({ length: 3000 }, () => composedTextNode("abcdefghij")),
+    );
+    if (shadow) {
+      const host = composedElement([]);
+      const slot = composedElement([composedTextNode("fallback")]);
+      slot.localName = "slot";
+      slot.assigned = root.childNodes;
+      host.shadowRoot = new ComposedTestShadowRoot(host, [slot]);
+      root.childNodes = [host, composedElement([composedTextNode("after shadow")])];
+      host.parentElement = root;
+      host.parentNode = root;
+    }
+    const result = library.composedText(root as unknown as Node, 60);
+    assert.equal(result, `${Array(6).fill("abcdefghij").join(" ").slice(0, 59)}…`);
+    assert.ok(styleChecks > 0);
+    assert.ok(styleChecks <= 30, `visibility checks: ${styleChecks}, shadow: ${shadow}`);
+  }
+});
+
+test("R11: composedText returns the same text as a full walk", () => {
+  const library = composedTestLibrary();
+  const hidden = composedElement([composedTextNode("hidden")]);
+  hidden.display = "none";
+  const skipped = composedTextNode("skip this");
+  const host = composedElement([composedTextNode("unused light DOM")]);
+  const slot = composedElement([composedTextNode("unused fallback")]);
+  slot.localName = "slot";
+  slot.assigned = host.childNodes;
+  host.childNodes[0]!.textContent = "slotted text";
+  host.shadowRoot = new ComposedTestShadowRoot(host, [
+    composedElement([composedTextNode("shadow text")]),
+    slot,
+    composedElement([composedTextNode("x".repeat(100))]),
+  ]);
+  const fallbackSlot = composedElement([composedTextNode("fallback text")]);
+  fallbackSlot.localName = "slot";
+  const cases: { name: string; root: ComposedTestNode; skip?: (node: Text) => boolean }[] = [
+    { name: "shorter", root: composedElement([composedTextNode("  short\n text  ")]) },
+    {
+      name: "exact",
+      root: composedElement([composedTextNode("x".repeat(60)), composedTextNode("later")]),
+    },
+    { name: "crossing", root: composedElement([composedTextNode("x".repeat(100))]) },
+    {
+      name: "spaces at boundary",
+      root: composedElement([
+        composedTextNode("a".repeat(59)),
+        composedTextNode("b"),
+        composedTextNode("later"),
+      ]),
+    },
+    {
+      name: "existing marker",
+      root: composedElement([
+        composedTextNode(`${"x".repeat(58)}…more`),
+        composedTextNode("later"),
+      ]),
+    },
+    {
+      name: "hidden before and after",
+      root: composedElement([hidden, composedTextNode("x".repeat(100)), hidden]),
+    },
+    {
+      name: "skip",
+      root: composedElement([
+        skipped,
+        composedTextNode("keep this"),
+        composedTextNode("x".repeat(100)),
+      ]),
+      skip: (node) => node === (skipped as unknown as Text),
+    },
+    {
+      name: "nested",
+      root: composedElement([
+        composedElement([
+          composedElement([composedTextNode("nested")]),
+          composedTextNode("content"),
+        ]),
+      ]),
+    },
+    {
+      name: "shadow and assigned slot",
+      root: composedElement([host, composedTextNode("after shadow")]),
+    },
+    { name: "root shadow", root: host },
+    { name: "fallback slot", root: composedElement([fallbackSlot]) },
+  ];
+  for (const item of cases) {
+    for (const limit of [0, 1, 5, 60, 200]) {
+      assert.equal(
+        library.composedText(item.root as unknown as Node, limit, item.skip),
+        fullWalkComposedText(item.root, limit, item.skip),
+        `${item.name}, limit ${limit}`,
+      );
+    }
+  }
+  assert.equal(library.composedText(cases[0]!.root as unknown as Node, 60), "short text");
+  assert.equal(library.composedText(cases[1]!.root as unknown as Node, 60), "x".repeat(60));
+  assert.equal(library.composedText(hidden as unknown as Node, 60), "");
+  assert.equal(
+    library.composedText(host as unknown as Node, 200),
+    `shadow text slotted text ${"x".repeat(100)}`,
+  );
+  // The text visitor can stop, but the element visitor must still traverse the whole tree.
+  assert.equal(library.composedElements(cases[8]!.root as unknown as Node).length, 4);
+});
+
+function composedTestLibrary(onStyle = () => {}) {
+  const context: {
+    __jevpilotObserverLibrary?: ObserverPageLibrary;
+    getComputedStyle: (node: ComposedTestNode) => object;
+    ShadowRoot: typeof ComposedTestShadowRoot;
+  } = {
+    getComputedStyle: (node) => {
+      onStyle();
+      return { display: node.display, visibility: "visible", opacity: "1" };
+    },
+    ShadowRoot: ComposedTestShadowRoot,
+  };
+  runInNewContext(`(${installObserverLibrary.toString()})()`, context);
+  return context.__jevpilotObserverLibrary!;
+}
+
+function composedTextNode(textContent: string) {
+  const node = new ComposedTestNode();
+  node.nodeType = 3;
+  node.textContent = textContent;
+  return node;
+}
+
+function composedElement(childNodes: ComposedTestNode[]) {
+  const node = new ComposedTestNode();
+  node.childNodes = childNodes;
+  for (const child of childNodes) {
+    child.parentElement = node;
+    child.parentNode = node;
+  }
+  return node;
+}
+
+class ComposedTestNode {
+  nodeType = 1;
+  localName = "div";
+  textContent = "";
+  display = "block";
+  childNodes: ComposedTestNode[] = [];
+  parentElement: ComposedTestNode | null = null;
+  parentNode: ComposedTestNode | null = null;
+  shadowRoot: ComposedTestShadowRoot | null = null;
+  assigned: ComposedTestNode[] = [];
+  getRootNode(): ComposedTestNode {
+    return this.parentNode?.getRootNode() ?? this;
+  }
+  getAttribute() {
+    return null;
+  }
+  hasAttribute() {
+    return false;
+  }
+  closest() {
+    return null;
+  }
+  assignedNodes() {
+    return this.assigned;
+  }
+  getBoundingClientRect() {
+    return { x: 0, y: 0, width: 10, height: 10 };
+  }
+}
+
+class ComposedTestShadowRoot extends ComposedTestNode {
+  host: ComposedTestNode;
+  constructor(host: ComposedTestNode, children: ComposedTestNode[]) {
+    super();
+    this.nodeType = 11;
+    this.host = host;
+    this.childNodes = children;
+    for (const child of children) child.parentNode = this;
+  }
+}
+
+function fullWalkComposedText(
+  root: ComposedTestNode,
+  limit: number,
+  skip?: (node: Text) => boolean,
+): string {
+  const clean = (value: string, budget: number) => {
+    const text = value.replace(/\s+/gu, " ").trim();
+    if (text.length <= budget) return text;
+    if (budget <= 0) return "";
+    const prefix = text.slice(0, budget - 1);
+    return prefix.endsWith("…") ? prefix : `${prefix}…`;
+  };
+  const parts: string[] = [];
+  const walk = (container: ComposedTestNode) => {
+    for (const node of (container.shadowRoot ?? container).childNodes) visit(node);
+  };
+  const visit = (node: ComposedTestNode) => {
+    if (node.nodeType === 3 && !skip?.(node as unknown as Text)) {
+      let parent = node.parentElement;
+      let visible = !!parent;
+      while (parent) {
+        if (parent.display === "none") visible = false;
+        const root = parent.getRootNode();
+        parent =
+          parent.parentElement ?? (root instanceof ComposedTestShadowRoot ? root.host : null);
+      }
+      if (visible) {
+        const part = clean(node.textContent, Math.max(0, limit - parts.join(" ").length));
+        if (part) parts.push(part);
+      }
+    }
+    if (node.shadowRoot) walk(node.shadowRoot);
+    else if (node.localName === "slot") {
+      for (const child of node.assigned.length ? node.assigned : node.childNodes) visit(child);
+    } else walk(node);
+  };
+  walk(root);
+  return clean(parts.join(" "), limit);
+}
 
 test("R7: a link target written with line breaks cannot add lines to the observation", () => {
   const pageUrl = "https://example.test/start";

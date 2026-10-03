@@ -138,14 +138,35 @@ export function pageSnapshot(options: SnapshotOptions): Omit<Observation, "timin
           }
         })();
         iframeOrigins.push(origin);
-        if (frame.src) {
+        const rules = options.adFrameRules;
+        const adFrame =
+          rules &&
+          ([frame.name, frame.id].some(
+            (name) =>
+              name &&
+              (rules.names.includes(name) ||
+                rules.namePrefixes.some((prefix) => name.startsWith(prefix))),
+          ) ||
+            (() => {
+              try {
+                const host = new URL(frame.src, location.href).hostname.toLowerCase();
+                return (
+                  rules.exactHosts.includes(host) ||
+                  rules.hosts.some((suffix) => host === suffix || host.endsWith(`.${suffix}`))
+                );
+              } catch {
+                return false;
+              }
+            })());
+        if (frame.src || adFrame) {
           iframes.push({
-            url: frame.src,
+            url: frame.src || "about:blank",
             framePath,
             visible: markerVisible(element, rect),
             rect,
           });
         }
+        if (adFrame) continue;
         try {
           if (options.traverseFrames !== false && frame.contentDocument) {
             visit(

@@ -53,6 +53,396 @@ test("CDP profile validation reports all zod issues", async () => {
   );
 });
 
+test("R12: frames() without the ad option still returns ad frames", async () => {
+  const f = await fixture({
+    frameCall(message, send) {
+      if (message.method !== "Page.getFrameTree") return false;
+      send({
+        id: message.id,
+        result: {
+          frameTree: {
+            frame: { id: "main", url: "https://example.org/" },
+            childFrames: [
+              {
+                frame: { id: "named-ad", name: "google_ads_iframe_/1/x", url: "about:blank" },
+                childFrames: [{ frame: { id: "nested", url: "https://example.org/" } }],
+              },
+              { frame: { id: "host-ad", url: "https://tpc.googlesyndication.com/" } },
+              { frame: { id: "payment", url: "https://checkout.stripe.com/" } },
+            ],
+          },
+        },
+      });
+      return true;
+    },
+  });
+  try {
+    const start = f.sent.length;
+    const filtered = await f.page.frames({ skipAdFrames: true, timeoutMs: 1000 });
+    assert.deepEqual(
+      filtered.map((frame) => frame.id),
+      ["payment"],
+    );
+    assert.equal(filtered.framesSkipped ?? 0, 0);
+    const work = f.sent
+      .slice(start)
+      .filter((message) =>
+        ["Page.createIsolatedWorld", "DOM.getFrameOwner"].includes(String(message.method)),
+      );
+    assert.ok(work.length > 0);
+    assert.ok(
+      work.every((message) =>
+        ["payment", "main"].includes((message.params as { frameId: string }).frameId),
+      ),
+    );
+    const all = await f.page.frames();
+    assert.deepEqual(all.map((frame) => frame.id).sort(), [
+      "host-ad",
+      "named-ad",
+      "nested",
+      "payment",
+    ]);
+    for (const frame of all) assert.equal(await frame.callIsolated(() => true, []), true);
+  } finally {
+    await f.close();
+  }
+});
+
+test("R12: a cross-process frame inside an ad frame is skipped too", async () => {
+  // A Publisher Tag slot (about:blank, named by the ad library) often hosts the creative in a
+  // cross-origin frame from a CDN that is not on the host list.
+  const f = await fixture({
+    frameCall(message, send) {
+      if (message.method !== "Page.getFrameTree" || message.sessionId !== "s1") return false;
+      send({
+        id: message.id,
+        result: {
+          frameTree: {
+            frame: { id: "main", url: "https://example.org/" },
+            childFrames: [
+              { frame: { id: "ad-slot", name: "google_ads_iframe_/1/x", url: "about:blank" } },
+            ],
+          },
+        },
+      });
+      return true;
+    },
+    childFrameTree(message, send) {
+      send({
+        id: message.id,
+        result: {
+          frameTree: {
+            frame: { id: "child-frame", parentId: "ad-slot", url: "https://s0.2mdn.net/creative" },
+          },
+        },
+      });
+      return true;
+    },
+  });
+  try {
+    f.event(
+      "Target.attachedToTarget",
+      { sessionId: "child", targetInfo: { type: "iframe", targetId: "child-frame" } },
+      "s1",
+    );
+    await waitUntil(() =>
+      f.sent.some(
+        (message) => message.method === "Page.createIsolatedWorld" && message.sessionId === "child",
+      ),
+    );
+    const filtered = await f.page.frames({ skipAdFrames: true, timeoutMs: 1000 });
+    assert.deepEqual(
+      filtered.map((frame) => frame.id),
+      [],
+    );
+    const all = await f.page.frames();
+    assert.ok(all.some((frame) => frame.id === "child-frame"));
+  } finally {
+    await f.close();
+  }
+});
+
+test("R13: a pending setup of an ad frame does not delay frames() with skipAdFrames", async () => {
+  const f = await fixture({
+    childSetup: (message) => message.method === "Page.enable",
+  });
+  try {
+    f.event(
+      "Target.attachedToTarget",
+      {
+        sessionId: "child",
+        targetInfo: {
+          type: "iframe",
+          targetId: "child-frame",
+          url: "https://tpc.googlesyndication.com/ad",
+        },
+      },
+      "s1",
+    );
+    await waitUntil(() =>
+      f.sent.some((message) => message.method === "Page.enable" && message.sessionId === "child"),
+    );
+    const started = Date.now();
+    assert.deepEqual(await f.page.frames({ skipAdFrames: true, timeoutMs: 1000 }), []);
+    assert.ok(Date.now() - started < 300);
+    assert.ok(
+      !f.sent.some(
+        (message) => message.method === "Page.getFrameTree" && message.sessionId === "child",
+      ),
+    );
+    const unfilteredStart = Date.now();
+    await f.page.frames({ timeoutMs: 1000 });
+    assert.ok(Date.now() - unfilteredStart >= 900);
+    assert.ok(
+      !f.sent.some(
+        (message) => message.method === "Page.getFrameTree" && message.sessionId === "child",
+      ),
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("R13: an OOPIF whose parent frame is an ad frame is not waited for either", async () => {
+  const f = await fixture({ childSetup: (message) => message.method === "Page.enable" });
+  try {
+    f.event(
+      "Page.frameNavigated",
+      {
+        frame: {
+          id: "ad-slot",
+          parentId: "main",
+          name: "google_ads_iframe_/1/x",
+          url: "about:blank",
+        },
+      },
+      "s1",
+    );
+    f.event(
+      "Target.attachedToTarget",
+      {
+        sessionId: "child",
+        targetInfo: {
+          type: "iframe",
+          targetId: "child-frame",
+          parentFrameId: "ad-slot",
+          url: "https://creative.example.org/",
+        },
+      },
+      "s1",
+    );
+    await waitUntil(() =>
+      f.sent.some((message) => message.method === "Page.enable" && message.sessionId === "child"),
+    );
+    const started = Date.now();
+    assert.deepEqual(await f.page.frames({ skipAdFrames: true, timeoutMs: 1000 }), []);
+    assert.ok(Date.now() - started < 300);
+    assert.ok(
+      !f.sent.some(
+        (message) => message.method === "Page.getFrameTree" && message.sessionId === "child",
+      ),
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("R13: the remembered ad frames are forgotten when their frames detach", async () => {
+  for (const detach of ["Page.frameDetached", "Target.detachedFromTarget"]) {
+    let ad = true;
+    const f = await fixture({
+      childFrameTree(message, send) {
+        send({
+          id: message.id,
+          result: {
+            frameTree: {
+              frame: { id: "child-frame", ...(ad ? { name: "google_ads_iframe_/1/x" } : {}) },
+            },
+          },
+        });
+        return true;
+      },
+    });
+    try {
+      const attach = () =>
+        f.event(
+          "Target.attachedToTarget",
+          {
+            sessionId: "child",
+            targetInfo: { type: "iframe", targetId: "child-frame", url: "https://example.org/" },
+          },
+          "s1",
+        );
+      attach();
+      await waitUntil(() =>
+        f.sent.some(
+          (message) =>
+            message.method === "Page.createIsolatedWorld" && message.sessionId === "child",
+        ),
+      );
+      assert.deepEqual(await f.page.frames({ skipAdFrames: true, timeoutMs: 1000 }), []);
+      const start = f.sent.length;
+      assert.deepEqual(await f.page.frames({ skipAdFrames: true, timeoutMs: 1000 }), []);
+      assert.ok(
+        !f.sent
+          .slice(start)
+          .some(
+            (message) => message.method === "Page.getFrameTree" && message.sessionId === "child",
+          ),
+      );
+      f.event(
+        detach,
+        detach === "Page.frameDetached" ? { frameId: "child-frame" } : { sessionId: "child" },
+        "s1",
+      );
+      await f.page.callIsolated(() => true, []);
+      ad = false;
+      if (detach === "Target.detachedFromTarget") {
+        const setupStart = f.sent.length;
+        attach();
+        await waitUntil(() =>
+          f.sent
+            .slice(setupStart)
+            .some(
+              (message) =>
+                message.method === "Page.createIsolatedWorld" && message.sessionId === "child",
+            ),
+        );
+      }
+      const frames = await f.page.frames({ skipAdFrames: true, timeoutMs: 1000 });
+      assert.ok(frames.some((frame) => frame.id === "child-frame"));
+      assert.ok(
+        f.sent
+          .slice(start)
+          .some(
+            (message) => message.method === "Page.getFrameTree" && message.sessionId === "child",
+          ),
+      );
+    } finally {
+      await f.close();
+    }
+  }
+});
+
+test("R13: an ad slot that becomes a cross-process frame stays an ad frame", async () => {
+  // A Publisher Tag slot is first known by its library-generated name; when it swaps to its own
+  // process, the attach event only carries the creative's CDN URL and must not clear that.
+  const f = await fixture({
+    childFrameTree(message, send) {
+      send({
+        id: message.id,
+        result: {
+          frameTree: {
+            frame: { id: "slot", name: "google_ads_iframe_/1/x", url: "https://cdn.example/c" },
+          },
+        },
+      });
+      return true;
+    },
+  });
+  try {
+    f.event(
+      "Page.frameNavigated",
+      {
+        frame: { id: "slot", parentId: "main", name: "google_ads_iframe_/1/x", url: "about:blank" },
+      },
+      "s1",
+    );
+    f.event(
+      "Target.attachedToTarget",
+      {
+        sessionId: "child",
+        targetInfo: { type: "iframe", targetId: "slot", url: "https://cdn.example/c" },
+      },
+      "s1",
+    );
+    await waitUntil(() =>
+      f.sent.some(
+        (message) => message.method === "Page.createIsolatedWorld" && message.sessionId === "child",
+      ),
+    );
+    const start = f.sent.length;
+    assert.deepEqual(await f.page.frames({ skipAdFrames: true, timeoutMs: 1000 }), []);
+    assert.ok(
+      !f.sent
+        .slice(start)
+        .some((message) => message.method === "Page.getFrameTree" && message.sessionId === "child"),
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("R13: a frame that goes away during its setup does not delay frames()", async () => {
+  // Ad refreshes attach and detach frames quickly; a detached frame's setup only ends with its CDP timeout.
+  for (const skipAdFrames of [false, true]) {
+    const f = await fixture({ childSetup: (message) => message.method === "Page.enable" });
+    try {
+      f.event(
+        "Target.attachedToTarget",
+        {
+          sessionId: "child",
+          targetInfo: { type: "iframe", targetId: "child-frame", url: "https://example.org/" },
+        },
+        "s1",
+      );
+      await waitUntil(() =>
+        f.sent.some((message) => message.method === "Page.enable" && message.sessionId === "child"),
+      );
+      f.event("Target.detachedFromTarget", { sessionId: "child" }, "s1");
+      await f.page.callIsolated(() => true, []);
+      const started = Date.now();
+      assert.deepEqual(await f.page.frames({ skipAdFrames, timeoutMs: 1000 }), []);
+      assert.ok(Date.now() - started < 300, `skipAdFrames ${skipAdFrames}`);
+    } finally {
+      await f.close();
+    }
+  }
+});
+
+test("R13: a frame that navigates away from an ad host is observed again", async () => {
+  const f = await fixture({
+    childFrameTree(message, send) {
+      send({
+        id: message.id,
+        result: { frameTree: { frame: { id: "child-frame", url: "https://example.org/widget" } } },
+      });
+      return true;
+    },
+  });
+  try {
+    f.event(
+      "Target.attachedToTarget",
+      {
+        sessionId: "child",
+        targetInfo: {
+          type: "iframe",
+          targetId: "child-frame",
+          url: "https://tpc.googlesyndication.com/ad",
+        },
+      },
+      "s1",
+    );
+    await waitUntil(() =>
+      f.sent.some(
+        (message) => message.method === "Page.createIsolatedWorld" && message.sessionId === "child",
+      ),
+    );
+    assert.deepEqual(await f.page.frames({ skipAdFrames: true, timeoutMs: 1000 }), []);
+    // The frame's own navigation event carries its current name and URL, which are not an ad's.
+    f.event(
+      "Page.frameNavigated",
+      { frame: { id: "child-frame", url: "https://example.org/widget" } },
+      "child",
+    );
+    await f.page.callIsolated(() => true, []);
+    const frames = await f.page.frames({ skipAdFrames: true, timeoutMs: 1000 });
+    assert.ok(frames.some((frame) => frame.id === "child-frame"));
+  } finally {
+    await f.close();
+  }
+});
+
 async function fixture(
   options: {
     autoAcceptAlerts?: boolean;
