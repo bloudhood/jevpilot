@@ -24,7 +24,12 @@ export function parseActionabilityTimeout(value: string | undefined): number | u
 
 function parseExtraArgs(value: string | undefined): string[] | undefined {
   if (value === undefined || value.trim() === "") return undefined;
-  return value.trim().split(/\s+/u);
+  const args = value.trim().split(/\s+/u);
+  if (args.some((argument) => !argument.startsWith("-")))
+    throw new McpUserError(
+      "Invalid JEVPILOT_EXTRA_ARGS token; flags containing spaces belong in an extraArgs entry of a JEVPILOT_PROFILE_FILE profile.",
+    );
+  return args;
 }
 
 export async function loadMcpProfile(

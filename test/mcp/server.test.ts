@@ -15,11 +15,141 @@ import { CdpTimeoutError } from "../../src/browser/errors.ts";
 import { createServer } from "../../src/mcp/server.ts";
 import { fakeMcpDeps, fakeObservation } from "../support/mcp-fixture.ts";
 import { FakePageHandle } from "../support/fake-engine.ts";
+import type { DecisionResult } from "../../src/decision/types.ts";
 
 const data = (result: unknown): Record<string, unknown> =>
   (result as { structuredContent: Record<string, unknown> }).structuredContent;
 const text = (result: unknown): string =>
   (result as { content: { text: string }[] }).content[0]!.text;
+
+async function cancelledDecision(resume: boolean) {
+  const deps = fakeMcpDeps();
+  deps.maxSessions = 1;
+  const deferred = () => {
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => {
+      resolve = done;
+    });
+    return { promise, resolve };
+  };
+  const blocked = deferred();
+  const aborted = deferred();
+  const closed = deferred();
+  let calls = 0;
+  let actions = 0;
+  let blockedSignal: AbortSignal | undefined;
+  const blockedCall = resume ? 3 : 2;
+  const answer: DecisionResult = {
+    answers: {},
+    usage: { inputTokens: 1, outputTokens: 1 },
+    provider: "mock",
+    model: "mock",
+    latencyMs: 0,
+    attempts: 1,
+  };
+  deps.decisionPort = {
+    decide: async (_request, options) => {
+      calls++;
+      if (calls !== blockedCall) return answer;
+      blockedSignal = options?.signal;
+      assert.ok(blockedSignal);
+      blocked.resolve();
+      return new Promise<DecisionResult>((_resolve, reject) => {
+        const cancel = () => {
+          aborted.resolve();
+          reject(new Error("decision aborted"));
+        };
+        if (blockedSignal!.aborted) cancel();
+        else blockedSignal!.addEventListener("abort", cancel, { once: true });
+      });
+    },
+  };
+  deps.orchestrator!.interpret = () =>
+    (resume && calls === 1) || calls > blockedCall
+      ? { type: "handoff", reason: "needs_values", source: "code", details: {} }
+      : { type: "act", action: { kind: "scroll", direction: "down" } };
+  deps.orchestrator!.executeAction = async (page) => {
+    actions++;
+    await page.wheel(0, 0, 100);
+    return {
+      outcome: "changed",
+      changes: { url: false, pageHash: true, value: false, checked: false },
+      timings: { precheckMs: 0, inputMs: 0, settleMs: 0, harnessMs: 0 },
+    };
+  };
+  const app = createServer(deps);
+  const client = new Client({ name: "r10-cancel", version: "1" });
+  const [left, right] = InMemoryTransport.createLinkedPair();
+  await app.server.connect(right);
+  await client.connect(left);
+  const controller = new AbortController();
+  const writes: string[] = [];
+  const write = process.stderr.write;
+  process.stderr.write = ((chunk: unknown) => {
+    writes.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    const session = resume
+      ? data(await client.callTool({ name: "browser_run", arguments: { goal: "Finish" } })).session
+      : undefined;
+    const pending = client.callTool(
+      resume
+        ? { name: "browser_resume", arguments: { session } }
+        : { name: "browser_run", arguments: { goal: "Finish" } },
+      undefined,
+      { signal: controller.signal },
+    );
+    const rejected = assert.rejects(pending, /cancelled by test/u);
+    await blocked.promise;
+    assert.equal(actions, 1);
+    deps.pages[0]!.close = async () => {
+      closed.resolve();
+    };
+    controller.abort(new Error("cancelled by test"));
+    await rejected;
+    await aborted.promise;
+    assert.equal(blockedSignal?.aborted, true);
+    if (resume) {
+      // This queued request also waits for the cancelled invocation to release its session chain.
+      assert.equal(
+        data(await client.callTool({ name: "browser_observe", arguments: { session } })).status,
+        "RUNNING",
+      );
+      const result = await client.callTool({ name: "browser_close", arguments: { session } });
+      assert.equal(result.isError, undefined);
+      assert.deepEqual(data(result), { session, closed: true });
+    } else {
+      await closed.promise;
+    }
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(calls, blockedCall);
+    assert.equal(actions, 1);
+    assert.equal(deps.pages[0]!.calls.filter((call) => call.name === "wheel").length, 1);
+    assert.deepEqual(writes, [], "request cancellation must not be logged as a tool failure");
+    if (!resume) {
+      const next = data(
+        await client.callTool({ name: "browser_run", arguments: { goal: "Again" } }),
+      );
+      assert.notEqual(next.reason, "too_many_sessions");
+      assert.equal(next.status, "NEEDS_VALUES");
+      assert.equal(deps.pages.length, 2);
+    }
+  } finally {
+    process.stderr.write = write;
+    controller.abort();
+    await client.close();
+    await app.close();
+  }
+}
+
+test("R10: a cancelled browser_run stops deciding and acting", { timeout: 5000 }, async () => {
+  await cancelledDecision(false);
+});
+
+test("R10: a cancelled browser_resume stops and keeps its session", { timeout: 5000 }, async () => {
+  await cancelledDecision(true);
+});
 
 test("R2: result url, title and tab urls are redacted", async () => {
   const secret = "env:JEVPILOT_SECRET_R2";

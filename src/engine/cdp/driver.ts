@@ -1070,12 +1070,13 @@ class CdpPageHandle implements PageHandle {
         timedOut = error instanceof CdpTimeoutError;
         throw error;
       } finally {
-        if (!timedOut)
-          await this.browser.client.call(
-            "Runtime.releaseObject",
-            { objectId },
-            this.session.sessionId,
-          );
+        const cleanup = this.browser.client.call(
+          "Runtime.releaseObject",
+          { objectId },
+          this.session.sessionId,
+        );
+        if (timedOut) void cleanup.catch(() => {});
+        else await cleanup;
       }
     } catch (error) {
       throw this.pageCallError(error);
@@ -1461,10 +1462,15 @@ export function createCdpDriver(deps: LaunchDeps & { lookup?: AddressLookup } = 
             throw cause;
           }
         },
-        pages: () =>
-          [...pages.values()].filter((page) =>
-            [...browser.sessions].some((session) => session.targetId === page.id),
-          ),
+        pages: () => {
+          const targets = new Set([...browser.sessions].map((session) => session.targetId));
+          for (const targetId of pages.keys()) {
+            if (targets.has(targetId)) continue;
+            pages.delete(targetId);
+            contexts.delete(targetId);
+          }
+          return [...pages.values()];
+        },
         close: () => browser.close(),
       };
     },

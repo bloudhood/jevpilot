@@ -119,7 +119,9 @@ export async function drag(
       throw error;
     } finally {
       off();
-      if (!timedOut) await client.call("Input.setInterceptDrags", { enabled: false }, sessionId);
+      const cleanup = client.call("Input.setInterceptDrags", { enabled: false }, sessionId);
+      if (timedOut) void cleanup.catch(() => {});
+      else await cleanup;
     }
   }
 }
@@ -304,15 +306,16 @@ export async function keyPress(
     timedOut = error instanceof CdpTimeoutError;
     throw error;
   } finally {
-    if (!timedOut)
-      await client.call(
-        "Input.dispatchKeyEvent",
-        { type: "keyUp", ...common, modifiers: mask },
-        sessionId,
-      );
-    for (const modifier of timedOut ? [] : [...modifiers].reverse()) {
+    const cleanup = client.call(
+      "Input.dispatchKeyEvent",
+      { type: "keyUp", ...common, modifiers: mask },
+      sessionId,
+    );
+    if (timedOut) void cleanup.catch(() => {});
+    else await cleanup;
+    for (const modifier of [...modifiers].reverse()) {
       mask &= ~modifierCodes[modifier]!.bit;
-      await client.call(
+      const release = client.call(
         "Input.dispatchKeyEvent",
         {
           type: "keyUp",
@@ -324,6 +327,8 @@ export async function keyPress(
         },
         sessionId,
       );
+      if (timedOut) void release.catch(() => {});
+      else await release;
     }
   }
 }
@@ -357,23 +362,25 @@ export async function selectAll(client: CdpClient, sessionId: string): Promise<v
       timedOut = error instanceof CdpTimeoutError;
       throw error;
     } finally {
-      if (!timedOut)
-        await client.call(
-          "Input.dispatchKeyEvent",
-          { type: "keyUp", ...letter, modifiers: 2 },
-          sessionId,
-        );
+      const cleanup = client.call(
+        "Input.dispatchKeyEvent",
+        { type: "keyUp", ...letter, modifiers: 2 },
+        sessionId,
+      );
+      if (timedOut) void cleanup.catch(() => {});
+      else await cleanup;
     }
   } catch (error) {
     timedOut = error instanceof CdpTimeoutError;
     throw error;
   } finally {
-    if (!timedOut)
-      await client.call(
-        "Input.dispatchKeyEvent",
-        { type: "keyUp", ...control, modifiers: 0 },
-        sessionId,
-      );
+    const cleanup = client.call(
+      "Input.dispatchKeyEvent",
+      { type: "keyUp", ...control, modifiers: 0 },
+      sessionId,
+    );
+    if (timedOut) void cleanup.catch(() => {});
+    else await cleanup;
   }
 }
 export async function screenshot(

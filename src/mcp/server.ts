@@ -21,6 +21,7 @@ import type { BrowserHandle, LaunchOptions, PageEvents } from "../engine/types.t
 import { McpUserError } from "./errors.ts";
 import {
   OrchestratorSession,
+  SessionCancelledError,
   type ManualOp,
   type SessionDeps,
   type SessionOptions,
@@ -338,6 +339,7 @@ export function createServer(deps: McpDeps): {
       return result(await operation());
     } catch (error) {
       if (error instanceof McpUserError) return failure(error.message);
+      if (error instanceof SessionCancelledError) return failure("Request cancelled.");
       if (error instanceof BrowserDisconnectedError)
         return result(disconnectedResult(error.session));
       if (error instanceof EngineRegistryError)
@@ -447,7 +449,7 @@ export function createServer(deps: McpDeps): {
           closingSessions.delete(id);
           const directory = screenshotDirs.get(id);
           screenshotDirs.delete(id);
-          if (directory) await rm(directory, { recursive: true, force: true });
+          if (directory) await rm(directory, { recursive: true, force: true }).catch(() => {});
         }),
       );
     })().finally(() => {
@@ -665,7 +667,7 @@ export function createServer(deps: McpDeps): {
               sessions.set(instance.id, instance);
               registered();
               try {
-                return await inSession(instance, () => instance.run());
+                return await inSession(instance, () => instance.run({ signal: extra.signal }));
               } finally {
                 if (unusable()) await discard();
               }
@@ -693,7 +695,7 @@ export function createServer(deps: McpDeps): {
       },
       outputSchema: sessionResultSchema.shape,
     },
-    (input) =>
+    (input, extra) =>
       handle("browser_resume", () => {
         if (
           deps.allowedDomains?.length &&
@@ -709,22 +711,25 @@ export function createServer(deps: McpDeps): {
           throw new McpUserError("Requested domain is outside the server allowlist.");
         const instance = requireSession(input.session);
         return inSession(instance, () =>
-          instance.resume({
-            ...(input.values ? { values: input.values } : {}),
-            ...(input.goal_update ? { goal_update: input.goal_update } : {}),
-            ...(input.allow_irreversible !== undefined
-              ? { allow_irreversible: input.allow_irreversible }
-              : {}),
-            ...(input.allowed_domains ? { allowed_domains: input.allowed_domains } : {}),
-            ...(input.dialog
-              ? {
-                  dialog: {
-                    accept: input.dialog.accept,
-                    ...(input.dialog.value_key ? { value_key: input.dialog.value_key } : {}),
-                  },
-                }
-              : {}),
-          }),
+          instance.resume(
+            {
+              ...(input.values ? { values: input.values } : {}),
+              ...(input.goal_update ? { goal_update: input.goal_update } : {}),
+              ...(input.allow_irreversible !== undefined
+                ? { allow_irreversible: input.allow_irreversible }
+                : {}),
+              ...(input.allowed_domains ? { allowed_domains: input.allowed_domains } : {}),
+              ...(input.dialog
+                ? {
+                    dialog: {
+                      accept: input.dialog.accept,
+                      ...(input.dialog.value_key ? { value_key: input.dialog.value_key } : {}),
+                    },
+                  }
+                : {}),
+            },
+            { signal: extra.signal },
+          ),
         );
       }),
   );
@@ -907,7 +912,7 @@ export function createServer(deps: McpDeps): {
           disconnectedSessions.delete(input.session);
           const directory = screenshotDirs.get(input.session);
           screenshotDirs.delete(input.session);
-          if (directory) await rm(directory, { recursive: true, force: true });
+          if (directory) await rm(directory, { recursive: true, force: true }).catch(() => {});
         }
         return { session: input.session, closed: true as const };
       }),

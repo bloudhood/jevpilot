@@ -27,13 +27,15 @@ export function expectedDateFormat(type: string): string | undefined {
 export function normalizeDateLike(type: string, value: string): string | undefined {
   const date = (source: string): string | undefined => {
     const match =
-      /^(\d{4})[-/.](\d{2})[-/.](\d{2})$/u.exec(source) ??
+      /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/u.exec(source) ??
       /^(\d{4})年(\d{1,2})月(\d{1,2})日$/u.exec(source);
     if (!match) return undefined;
     const year = Number(match[1]);
     const month = Number(match[2]);
     const day = Number(match[3]);
-    const actual = new Date(Date.UTC(year, month - 1, day));
+    const actual = new Date(0);
+    actual.setUTCHours(0, 0, 0, 0);
+    actual.setUTCFullYear(year, month - 1, day);
     if (
       year < 1 ||
       actual.getUTCFullYear() !== year ||

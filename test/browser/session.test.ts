@@ -5,7 +5,7 @@ import { sanitizeResponseHeaders } from "../../src/browser/response-headers.ts";
 import { fakeCdp } from "./fake-cdp.ts";
 
 describe("browser session", () => {
-  test("response headers exclude credentials and cap count and value length", () => {
+  test("R10: response headers named like tokens, secrets or keys are removed while detector headers are kept", () => {
     const headers = Object.fromEntries(
       Array.from({ length: 70 }, (_, index) => [`X-Header-${index}`, "x".repeat(3000)]),
     );
@@ -13,6 +13,14 @@ describe("browser session", () => {
       Authorization: "secret",
       "Proxy-Authorization": "secret",
       "Set-Cookie2": "secret",
+      "X-Api-Token": "secret",
+      "X-Session-Token": "secret",
+      "Private-Token": "secret",
+      "X-Secret": "secret",
+      "X-Access-Key": "secret",
+      "Cf-Mitigated": "challenge",
+      "X-Amzn-Waf-Action": "captcha",
+      "Content-Type": "text/html",
       ...headers,
     });
     assert.equal(Object.keys(selected).length, 64);
@@ -21,6 +29,14 @@ describe("browser session", () => {
     assert.equal(selected.authorization, undefined);
     assert.equal(selected["proxy-authorization"], undefined);
     assert.equal(selected["set-cookie2"], undefined);
+    assert.equal(selected["x-api-token"], undefined);
+    assert.equal(selected["x-session-token"], undefined);
+    assert.equal(selected["private-token"], undefined);
+    assert.equal(selected["x-secret"], undefined);
+    assert.equal(selected["x-access-key"], undefined);
+    assert.equal(selected["cf-mitigated"], "challenge");
+    assert.equal(selected["x-amzn-waf-action"], "captcha");
+    assert.equal(selected["content-type"], "text/html");
   });
   test("creates, attaches flattened and closes a page target", async () => {
     const methods: string[] = [];

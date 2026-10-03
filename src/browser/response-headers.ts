@@ -12,9 +12,14 @@ export function sanitizeResponseHeaders(headers: Record<string, unknown>): Recor
       key.includes("authorization") ||
       key === "proxy-authenticate" ||
       key === "www-authenticate" ||
-      key.includes("api-key") ||
-      key.includes("apikey") ||
-      key.includes("auth-token")
+      key.includes("token") ||
+      key.includes("secret") ||
+      key.includes("password") ||
+      key.includes("credential") ||
+      key.includes("session") ||
+      key.includes("cookie") ||
+      key.includes("auth") ||
+      /(?:^|[-_])(api|access)[-_]?key(?:$|[-_])/u.test(key)
     )
       continue;
     if (Object.keys(selected).length >= MAX_HEADERS) break;

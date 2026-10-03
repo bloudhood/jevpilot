@@ -163,6 +163,30 @@ describe("caller cancellation", () => {
 });
 
 describe("Retry-After", () => {
+  test("R10: a 429 whose error body cannot be cancelled is still retried after retry-after", async () => {
+    let calls = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("x".repeat(4096)));
+      },
+      cancel() {
+        return Promise.reject(new Error("cancel failed"));
+      },
+    });
+    const transport = deps(
+      async () => {
+        calls++;
+        return calls === 1
+          ? new Response(stream, { status: 429, headers: { "retry-after": "2" } })
+          : jsonResponse(fixture("typesafe"));
+      },
+      async (milliseconds) => assert.equal(milliseconds, 2000),
+    );
+    const result = await send(transport);
+    assert.equal(result.attempts, 2);
+    assert.equal(calls, 2);
+  });
+
   test("honors seconds", async () => {
     let calls = 0;
     const delays: number[] = [];

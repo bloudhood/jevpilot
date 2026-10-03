@@ -2,6 +2,35 @@
 
 This project follows Keep a Changelog. Versions use Semantic Versioning.
 
+## [0.2.1] - 2026-10-03
+
+Fixes for the confirmed findings of an external code review (issues #4–#14).
+
+### Security
+
+- Response headers named like tokens, secrets, sessions, credentials or API/access keys are dropped before the detectors see them.
+- A browser profile's `extraArgs` can no longer override `--user-data-dir`, `--remote-debugging-port`, `--remote-debugging-pipe`, `--remote-debugging-address` or `--proxy-server`; the server refuses to start and names the flag (use the profile's `proxy` field for a proxy).
+- SECURITY.md lists DNS rebinding between the network guard's lookup and the browser's connection as a known limit.
+
+### Fixed
+
+- A `browser_run` or `browser_resume` the client cancelled stops: a decision in progress is aborted and no further step starts, while an action already running finishes and is recorded. A cancelled `browser_run` still closes its session; a cancelled `browser_resume` keeps it. It used to keep deciding, clicking and typing until its budget ran out.
+- After a CDP call times out, the pressed key and its modifiers, Control in select-all and drag interception are still released, without waiting for a busy page.
+- An upload that times out still releases its remote object in the page.
+- When the frame tree cannot be read, a navigation reports its own response status and headers, not a child frame's.
+- Closing a session waits for all its tabs before removing its handoff screenshots, and a failure to remove them no longer replaces the real error or fails `browser_close`.
+- A failed creation of the handoff screenshot directory is retried at the next handoff instead of disabling screenshots for the session.
+- A retryable decision error (for example 429 with `retry-after`) stays retryable when its response body cannot be cancelled.
+- Date values accept a one-digit month or day (`2024-1-1`) and years before 100.
+- Values typed again and repeated futile submits are sent to the decision model once.
+- Pages whose tab was closed outside jevpilot are forgotten; a failed browser identity probe no longer leaves an unhandled rejection.
+- A `JEVPILOT_EXTRA_ARGS` value split at a space is refused with a pointer to `extraArgs` in a `JEVPILOT_PROFILE_FILE` profile.
+
+### Changed
+
+- docs/configuration.md explains that MCP clients cancel a tool call after their own request timeout (60 s in the TypeScript SDK), shorter than the default 180 s budget.
+- SECURITY.md names 0.2.x as the supported release line.
+
 ## [0.2.0] - 2026-09-30
 
 Fixes from a second code review and a review of those fixes, aimed at irreversible-action approval, secrets, the network guard, session state and the HTTP transport. Two configuration changes can stop an existing setup from starting: `JEVPILOT_HTTP_ALLOWED_HOSTS` on a non-loopback HTTP bind, and `JEVPILOT_BLOCKED_ADDRESSES` entries with host bits set.

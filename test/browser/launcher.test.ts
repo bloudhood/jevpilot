@@ -18,6 +18,64 @@ import type { CdpClient } from "../../src/browser/cdp/client.ts";
 import { fakeCdp } from "./fake-cdp.ts";
 import { BrowserSession } from "../../src/browser/session.ts";
 
+test("R10: a failed browser identity probe does not leave an unhandled rejection", async () => {
+  let failed = false;
+  const fake = await fakeCdp((message, send) => {
+    if (message.method === "Page.enable" && !failed) {
+      failed = true;
+      send({ id: message.id, error: { code: -32000, message: "probe enable failed" } });
+      return;
+    }
+    const result =
+      message.method === "Target.createTarget"
+        ? { targetId: "probe" }
+        : message.method === "Target.attachToTarget"
+          ? { sessionId: "probe-session" }
+          : message.method === "Browser.getVersion"
+            ? { userAgent: "HeadlessChrome/153" }
+            : message.method === "Target.getTargets"
+              ? { targetInfos: [] }
+              : {};
+    send({ id: message.id, result });
+  });
+  const directory = await mkdtemp(join(tmpdir(), "jevpilot-r10-probe-"));
+  const children: ChildProcess[] = [];
+  let browser: BrowserInstance | undefined;
+  const unhandled: unknown[] = [];
+  const onUnhandled = (error: unknown) => unhandled.push(error);
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    browser = await launchBrowser(
+      {
+        kind: "desktop-chrome",
+        userDataDir: directory,
+        windowSize: { width: 800, height: 600 },
+        executable: "/fake/r10-probe",
+      },
+      { selfCheck: false, timeoutMs: 100 },
+      {
+        platform: "linux",
+        env: {},
+        readFile: async () => `${new URL(fake.url).port}\n/devtools/browser/test\n`,
+        spawn: (() => {
+          const child = fakeProcess(1900 + children.length);
+          children.push(child);
+          return child;
+        }) as never,
+        kill: exitOnKill(children, []),
+      },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(failed, true);
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+    await browser?.close();
+    await fake.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("R1: an attach launch that fails its self-check restores the external browser", async () => {
   const calls: { method: string; params: unknown }[] = [];
   let fail = true;

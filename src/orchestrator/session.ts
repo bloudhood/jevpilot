@@ -320,6 +320,10 @@ function failureDetails(error: unknown): string[] {
   return ["UnknownError"];
 }
 
+export class SessionCancelledError extends Error {
+  override name = "SessionCancelledError";
+}
+
 export class OrchestratorSession {
   readonly id: string;
   page: PageHandle;
@@ -415,6 +419,7 @@ export class OrchestratorSession {
     url: string;
   }[] = [];
   private readonly futileSubmits: { url: string; value: string }[] = [];
+  private invocationSignal: AbortSignal | undefined;
   private lastCoveredTarget?: string;
   private secretLiterals = new Set<string>();
   private readonly ownedPages = new Set<PageHandle>();
@@ -809,7 +814,10 @@ export class OrchestratorSession {
     ) {
       const write = (async () => {
         try {
-          this.directoryCreation ??= this.deps.tempDir();
+          this.directoryCreation ??= this.deps.tempDir().catch((error) => {
+            this.directoryCreation = undefined;
+            throw error;
+          });
           this.directory ??= await this.directoryCreation;
           if (this.closed) return;
           const path = join(this.directory, `handoff-${this.steps}.png`);
@@ -925,23 +933,51 @@ export class OrchestratorSession {
       this.decisionTokens >= this.budget.decision_tokens
     );
   }
+  private checkCancellation(): void {
+    if (this.invocationSignal?.aborted) throw new SessionCancelledError("request cancelled");
+  }
+  private async withInvocationSignal(
+    signal: AbortSignal | undefined,
+    operation: () => Promise<SessionResult>,
+  ): Promise<SessionResult> {
+    this.invocationSignal = signal;
+    try {
+      this.checkCancellation();
+      const result = await operation();
+      this.checkCancellation();
+      return result;
+    } catch (error) {
+      this.checkCancellation();
+      throw error;
+    } finally {
+      this.invocationSignal = undefined;
+    }
+  }
   private async decideWithinBudget(request: DecisionRequest): Promise<DecisionResult> {
+    this.checkCancellation();
     const remaining = this.budget.seconds * 1000 - (this.deps.now() - this.invocationStarted);
     if (remaining <= 0) throw new DecisionAbortedError("session budget exhausted");
     const controller = new AbortController();
+    const abort = (): void => controller.abort();
+    this.invocationSignal?.addEventListener("abort", abort, { once: true });
     const timeout = setTimeout(() => controller.abort(), remaining);
     try {
-      return await this.deps.decide(request, { signal: controller.signal });
+      const result = await this.deps.decide(request, { signal: controller.signal });
+      this.checkCancellation();
+      return result;
     } catch (error) {
+      this.checkCancellation();
       if (controller.signal.aborted) throw new DecisionAbortedError("session budget exhausted");
       throw error;
     } finally {
       clearTimeout(timeout);
+      this.invocationSignal?.removeEventListener("abort", abort);
     }
   }
   private async sample(
     options: ObserveOptions = {},
   ): Promise<{ observation: Observation; findings: Finding[] }> {
+    this.checkCancellation();
     if (this.blockedByPolicy) throw new Error("blocked_address");
     const started = this.deps.now();
     const version = this.navigationVersion;
@@ -1103,10 +1139,12 @@ export class OrchestratorSession {
     }
   }
   private async replaceUnresponsivePage(url: string): Promise<NavigationResult> {
+    this.checkCancellation();
     if (!this.openIsolatedPage) throw new Error("isolated contexts are unavailable");
     const started = this.deps.now();
     const replacement = await this.openIsolatedPage(true);
     try {
+      this.checkCancellation();
       const navigation = await replacement.navigate(url, { timeoutMs: this.navigationTimeoutMs });
       if (navigation.failure && navigation.failure !== "timeout")
         throw new Error(`isolated navigation failed: ${navigation.failure}`);
@@ -1379,6 +1417,7 @@ export class OrchestratorSession {
       promptText = resolved;
     }
     const started = this.deps.now();
+    this.checkCancellation();
     await this.page.handleDialog(accept, promptText).catch((error: unknown) => {
       // The dialog can be gone before it is answered (its frame was removed or the page moved on); a
       // record of it would otherwise hold the session at this handoff for good.
@@ -1440,6 +1479,7 @@ export class OrchestratorSession {
     retriedStale = false,
     manual = false,
   ): Promise<SessionResult | undefined> {
+    if (!manual) this.checkCancellation();
     if (this.switchPendingPopup()) {
       this.queuedSample = await this.fresh();
       return undefined;
@@ -1513,6 +1553,7 @@ export class OrchestratorSession {
         } as Action;
         const retryValues = await this.valueFor(retryAction);
         if (!("status" in retryValues)) {
+          this.checkCancellation();
           const retryResult = await this.deps.executeAction(
             this.page,
             current.observation,
@@ -1638,6 +1679,7 @@ export class OrchestratorSession {
     this.staleRecoveryDeadline = started + Math.min(this.navigationTimeoutMs, 10_000);
     let result: ActionResult;
     try {
+      this.checkCancellation();
       result = await this.deps.executeAction(this.page, observation, action, values, {
         navigationTimeoutMs: this.navigationTimeoutMs,
         waitTimeoutMs: Math.max(
@@ -1662,6 +1704,8 @@ export class OrchestratorSession {
       this.queuedSample = refreshed;
       return undefined;
     }
+    // An action that started is finished and recorded even if the request was cancelled meanwhile:
+    // cancellation is checked only before the next step begins.
     const ms = Math.max(0, this.deps.now() - started);
     this.lastExecutedActionAt = this.deps.now();
     if (result.outcome === "not-focusable")
@@ -1736,7 +1780,8 @@ export class OrchestratorSession {
         (action.text !== undefined ||
           (valueKey !== undefined && typeof this.values[valueKey] === "string"))
       )
-        this.typedTexts.push({ text: typed, url: observation.url });
+        if (!this.typedTexts.some((entry) => entry.text === typed && entry.url === observation.url))
+          this.typedTexts.push({ text: typed, url: observation.url });
       if (
         typed !== undefined &&
         element &&
@@ -1786,7 +1831,12 @@ export class OrchestratorSession {
           ? (action.text ?? (action.valueKey ? values[action.valueKey] : undefined))
           : element.value;
       if (typeof value === "string" && !this.secretLiterals.has(value))
-        this.futileSubmits.push({ url: observation.url, value });
+        if (
+          !this.futileSubmits.some(
+            (entry) => entry.url === observation.url && entry.value === value,
+          )
+        )
+          this.futileSubmits.push({ url: observation.url, value });
     }
     this.recentActions = this.recentActions.slice(-2);
     if (result.dialog) this.pendingDialog = result.dialog;
@@ -1854,6 +1904,7 @@ export class OrchestratorSession {
         result.coveredBy &&
         ["listbox", "menu", "tooltip", "combobox"].includes(result.coveredBy.role)
       ) {
+        this.checkCancellation();
         await this.page.key("Escape");
         const refreshed = await this.fresh();
         const retry = this.retargetAction(action, element, refreshed.observation);
@@ -1875,7 +1926,10 @@ export class OrchestratorSession {
     this.queuedSample = next;
     return undefined;
   }
-  async run(): Promise<SessionResult> {
+  async run(options: { signal?: AbortSignal } = {}): Promise<SessionResult> {
+    return this.withInvocationSignal(options.signal, () => this.runInvocation());
+  }
+  private async runInvocation(): Promise<SessionResult> {
     this.beginInvocation();
     if (this.blockedByPolicy) return this.result("BLOCKED_BY_POLICY", "blocked_address");
     const unresponsive = await this.checkPageLiveness();
@@ -1893,8 +1947,10 @@ export class OrchestratorSession {
         delete this.initialNavigationFailure;
         return handoff;
       }
+      this.checkCancellation();
       if (this.exceeded()) return this.result("BUDGET_EXHAUSTED", "budget_exhausted");
       for (;;) {
+        this.checkCancellation();
         let sampled = await this.fresh(this.queuedSample);
         delete this.queuedSample;
         sampled = await this.waitForContent(sampled);
@@ -1942,7 +1998,7 @@ export class OrchestratorSession {
               secret: isSecret(value),
             })),
           // Every value this session typed, on any URL: an SPA may change the URL while a field keeps our value.
-          typedValues: this.typedTexts.map((entry) => entry.text),
+          typedValues: [...new Set(this.typedTexts.map((entry) => entry.text))],
           futileSubmits: this.futileSubmits,
           step: this.steps + 1,
           allowIrreversible: this.constraints.allow_irreversible,
@@ -1963,6 +2019,7 @@ export class OrchestratorSession {
         try {
           decision = await this.decideWithinBudget(decisionRequest);
         } catch (error) {
+          this.checkCancellation();
           await this.logDecisionFailure(decisionRequest, error, decisionStarted);
           if (
             this.exceeded() ||
@@ -1996,6 +2053,7 @@ export class OrchestratorSession {
           try {
             checked = await this.decideWithinBudget(checkRequest);
           } catch (error) {
+            this.checkCancellation();
             await this.logDecisionFailure(checkRequest, error, checkStarted);
             if (
               this.exceeded() ||
@@ -2138,6 +2196,7 @@ export class OrchestratorSession {
         if (gate) return gate;
       }
     } catch (error) {
+      this.checkCancellation();
       if (error instanceof PageUnresponsiveError) {
         const recovery = await this.unresponsiveHandoff();
         return recovery.reason === "isolated_reopen" ? this.runLoop() : recovery;
@@ -2164,70 +2223,73 @@ export class OrchestratorSession {
       allowed_domains?: string[];
       dialog?: { accept: boolean; value_key?: string };
     } = {},
+    options: { signal?: AbortSignal } = {},
   ): Promise<SessionResult> {
-    this.beginInvocation();
-    if (this.blockedByPolicy) return this.result("BLOCKED_BY_POLICY", "blocked_address");
-    const unresponsive = await this.checkPageLiveness();
-    if (unresponsive && unresponsive.reason !== "isolated_reopen") return unresponsive;
-    Object.assign(this.values, update.values);
-    for (const key of Object.keys(update.values ?? {})) this.consumedKeys.delete(key);
-    if (update.goal_update !== undefined) {
-      if (this.success && !this.successAssertionsIgnored && this.lastObservation) {
-        this.successAssertionsIgnored = await this.verified(this.lastObservation);
-        if (this.successAssertionsIgnored)
-          this.successAssertionsIgnoredWhen = "when the goal was updated";
-      }
-      this.goal = update.goal_update;
-    }
-    if (update.allowed_domains?.length)
-      this.constraints.allowed_domains = [
-        ...new Set([...(this.constraints.allowed_domains ?? []), ...update.allowed_domains]),
-      ];
-    if (this.exceeded()) return this.result("BUDGET_EXHAUSTED", "budget_exhausted");
-    if (update.dialog) {
-      try {
-        const answered = await this.answerDialog(update.dialog.accept, update.dialog.value_key);
-        if (answered) return answered;
-      } catch (error) {
-        if (error instanceof PageUnresponsiveError) {
-          const recovery = await this.unresponsiveHandoff();
-          return recovery.reason === "isolated_reopen" ? this.runLoop() : recovery;
+    return this.withInvocationSignal(options.signal, async () => {
+      this.beginInvocation();
+      if (this.blockedByPolicy) return this.result("BLOCKED_BY_POLICY", "blocked_address");
+      const unresponsive = await this.checkPageLiveness();
+      if (unresponsive && unresponsive.reason !== "isolated_reopen") return unresponsive;
+      Object.assign(this.values, update.values);
+      for (const key of Object.keys(update.values ?? {})) this.consumedKeys.delete(key);
+      if (update.goal_update !== undefined) {
+        if (this.success && !this.successAssertionsIgnored && this.lastObservation) {
+          this.successAssertionsIgnored = await this.verified(this.lastObservation);
+          if (this.successAssertionsIgnored)
+            this.successAssertionsIgnoredWhen = "when the goal was updated";
         }
-        if (this.staleFrame(error)) return this.recoverStale(this.sampleVersion);
-        return this.result("FAILED", "operation_failed", { failure: failureDetails(error) });
+        this.goal = update.goal_update;
       }
-    }
-    const pendingAction = this.pendingGatedAction;
-    const pendingAllowed =
-      pendingAction &&
-      (pendingAction.reason.startsWith("domain:")
-        ? !this.allowed(`https://${pendingAction.reason.slice(7)}/`)
-        : update.allow_irreversible === true);
-    if (pendingAction && pendingAllowed) {
-      const pending = pendingAction;
-      delete this.pendingGatedAction;
-      try {
-        const current = await this.sample();
-        const refreshed = samePage(pending.url, current.observation.url)
-          ? this.retargetAction(pending.action, pending, current.observation)
-          : undefined;
-        if (!refreshed) return this.handoff("uncertain", { missing: "stored target changed" });
-        const result = await this.execute(
-          refreshed,
-          undefined,
-          pending.reason.startsWith("domain:") ? false : true,
-        );
-        if (result) return result;
-      } catch (error) {
-        if (error instanceof PageUnresponsiveError) {
-          const recovery = await this.unresponsiveHandoff();
-          return recovery.reason === "isolated_reopen" ? this.runLoop() : recovery;
+      if (update.allowed_domains?.length)
+        this.constraints.allowed_domains = [
+          ...new Set([...(this.constraints.allowed_domains ?? []), ...update.allowed_domains]),
+        ];
+      if (this.exceeded()) return this.result("BUDGET_EXHAUSTED", "budget_exhausted");
+      if (update.dialog) {
+        try {
+          const answered = await this.answerDialog(update.dialog.accept, update.dialog.value_key);
+          if (answered) return answered;
+        } catch (error) {
+          if (error instanceof PageUnresponsiveError) {
+            const recovery = await this.unresponsiveHandoff();
+            return recovery.reason === "isolated_reopen" ? this.runLoop() : recovery;
+          }
+          if (this.staleFrame(error)) return this.recoverStale(this.sampleVersion);
+          return this.result("FAILED", "operation_failed", { failure: failureDetails(error) });
         }
-        if (this.staleFrame(error)) return this.recoverStale(this.sampleVersion);
-        return this.result("FAILED", "operation_failed", { failure: failureDetails(error) });
       }
-    }
-    return this.runLoop();
+      const pendingAction = this.pendingGatedAction;
+      const pendingAllowed =
+        pendingAction &&
+        (pendingAction.reason.startsWith("domain:")
+          ? !this.allowed(`https://${pendingAction.reason.slice(7)}/`)
+          : update.allow_irreversible === true);
+      if (pendingAction && pendingAllowed) {
+        const pending = pendingAction;
+        delete this.pendingGatedAction;
+        try {
+          const current = await this.sample();
+          const refreshed = samePage(pending.url, current.observation.url)
+            ? this.retargetAction(pending.action, pending, current.observation)
+            : undefined;
+          if (!refreshed) return this.handoff("uncertain", { missing: "stored target changed" });
+          const result = await this.execute(
+            refreshed,
+            undefined,
+            pending.reason.startsWith("domain:") ? false : true,
+          );
+          if (result) return result;
+        } catch (error) {
+          if (error instanceof PageUnresponsiveError) {
+            const recovery = await this.unresponsiveHandoff();
+            return recovery.reason === "isolated_reopen" ? this.runLoop() : recovery;
+          }
+          if (this.staleFrame(error)) return this.recoverStale(this.sampleVersion);
+          return this.result("FAILED", "operation_failed", { failure: failureDetails(error) });
+        }
+      }
+      return this.runLoop();
+    });
   }
   async act(
     ops: ManualOp[],
@@ -2603,10 +2665,15 @@ export class OrchestratorSession {
     this.detach(this.page);
     this.closing = (async () => {
       try {
-        await Promise.all([...this.ownedPages].map((page) => page.close()));
+        const closes = await Promise.allSettled([...this.ownedPages].map((page) => page.close()));
+        const failure = closes.find(
+          (result): result is PromiseRejectedResult => result.status === "rejected",
+        );
+        if (failure) throw failure.reason;
       } finally {
         await Promise.allSettled([...this.screenshotWrites]);
-        if (this.directory) await rm(this.directory, { recursive: true, force: true });
+        if (this.directory)
+          await rm(this.directory, { recursive: true, force: true }).catch(() => {});
       }
     })();
     return this.closing;

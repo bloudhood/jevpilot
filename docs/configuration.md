@@ -59,6 +59,8 @@ Flags containing spaces, such as `--host-resolver-rules=MAP *.internal.test 169.
 | `JEVPILOT_ACTIONABILITY_TIMEOUT_MS` | How long an action waits for its target to become visible, stable and enabled. Default 2000.                                                                                                                                                                |
 | `JEVPILOT_THRESHOLDS`               | Optional JSON object of confidence thresholds between 0 and 1 (see [docs/tools.md](tools.md)).                                                                                                                                                              |
 
+MCP clients cancel a tool call after their own request timeout (the TypeScript SDK defaults to 60 seconds), which is shorter than the default 180-second budget. Set the client timeout above `budget.seconds`, or lower `budget.seconds`; a cancelled `browser_run` stops and closes its session, while a cancelled `browser_resume` stops and keeps it.
+
 Page loads (top-level documents, iframes, redirects, popups and downloads) are checked against the addresses their host resolves to before the request is sent, and again against the address the browser actually connected to. A blocked main-frame load ends the session with `BLOCKED_BY_POLICY`; nothing from that page is observed or returned. Subresource requests (scripts, images, `fetch`) are not checked, and behind a browser proxy only the pre-request check applies.
 
 If a host remains unverified because the lookup times out or returns a resolver error other than `ENOTFOUND`/`ENODATA`, `private` mode refuses the document request, popup or download when the browser resolves names itself (no configured proxy). The default `metadata` mode and `off` with extra blocked ranges allow it and rely on the connected-IP check where it applies. Missing names are left to the browser in every mode.
@@ -122,7 +124,7 @@ claude mcp add --transport http jevpilot http://127.0.0.1:8940/mcp --header "Aut
 `jevpilot-mcp doctor` checks, with the same environment as the server: the Node version, every setting and its effective value, one real browser launch with its self-check, one minimal Jev call (latency and model; errors only by category) and the temp directory. `--no-browser` skips the launch and `--json` prints one JSON object. It exits with 1 when a check fails and never prints keys, tokens or secret values.
 
 ```sh
-npx -y --package https://github.com/bloudhood/jevpilot/releases/download/v0.2.0/jevpilot-0.2.0.tgz jevpilot-mcp doctor
+npx -y --package https://github.com/bloudhood/jevpilot/releases/download/v0.2.1/jevpilot-0.2.1.tgz jevpilot-mcp doctor
 ```
 
 ## Sessions

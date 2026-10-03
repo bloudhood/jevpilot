@@ -78,7 +78,7 @@ async function readErrorBody(response: Response, signal: AbortSignal): Promise<s
       chunks.push(chunk);
       bytes += chunk.length;
       if (next.value.length > remaining || bytes === maxErrorBytes) {
-        await reader.cancel();
+        await reader.cancel().catch(() => {});
         finished = true;
         break;
       }

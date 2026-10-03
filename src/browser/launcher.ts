@@ -92,6 +92,17 @@ export function buildLaunchArgs(profile: DesktopChromeProfile | ServerPlainProfi
   if (profile.extraArgs?.some((argument) => forbidden.test(argument))) {
     throw new BrowserConfigError("forbidden Chrome flag in extraArgs");
   }
+  for (const argument of profile.extraArgs ?? []) {
+    const flag = argument.split("=")[0]!;
+    if (
+      /^--(?:user-data-dir|remote-debugging-port|remote-debugging-pipe|remote-debugging-address|proxy-server)$/i.test(
+        flag,
+      )
+    )
+      throw new BrowserConfigError(
+        `managed Chrome flag ${flag} cannot be used in extraArgs${flag.toLowerCase() === "--proxy-server" ? "; use the profile's proxy field" : ""}`,
+      );
+  }
   return [
     "--remote-debugging-port=0",
     `--user-data-dir=${profile.userDataDir}`,
@@ -152,6 +163,7 @@ async function probeBrowserIdentity(
       const target = await client.call("Target.createTarget", { url: "about:blank" });
       const sessionId = await client.attach(target.targetId);
       const loaded = client.waitForEvent("Page.loadEventFired", () => true, timeoutMs, sessionId);
+      void loaded.catch(() => {});
       await client.call("Page.enable", {}, sessionId);
       await client.call("Page.navigate", { url: pathToFileURL(probeFile).href }, sessionId);
       await loaded;

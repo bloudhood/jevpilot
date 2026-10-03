@@ -27,6 +27,7 @@ import { buildDecisionState, interpret, type PolicyOutcome } from "../../src/pol
 import { estimateTokens, enforceLimits } from "../../src/decision/limits.ts";
 import {
   OrchestratorSession,
+  SessionCancelledError,
   type SessionDeps,
   type SessionOptions,
 } from "../../src/orchestrator/session.ts";
@@ -106,6 +107,233 @@ const decision: DecisionResult = {
   latencyMs: 0,
   attempts: 1,
 };
+
+function r10Deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+test("R10: OrchestratorSession.run stops at the next step boundary when its signal aborts", async () => {
+  const controller = new AbortController();
+  let decisions = 0;
+  const instance = fixture({
+    outcomes: [{ type: "act", action: action() }],
+    decide: async () => {
+      decisions++;
+      controller.abort();
+      return decision;
+    },
+  });
+  try {
+    await assert.rejects(
+      instance.session.run({ signal: controller.signal }),
+      SessionCancelledError,
+    );
+    assert.equal(decisions, 1);
+    assert.deepEqual(instance.seen.actions, []);
+    assert.equal((await instance.session.observe()).status, "RUNNING");
+    await instance.session.act([{ action: "click", ref: "e1" }]);
+    assert.equal(instance.seen.actions.length, 1, "manual action must not inherit cancellation");
+  } finally {
+    await instance.session.close();
+  }
+});
+
+test("R10: cancellation waits for an already running action and prevents the next step", async () => {
+  const controller = new AbortController();
+  const started = r10Deferred();
+  const finish = r10Deferred();
+  let decisions = 0;
+  const instance = fixture({
+    outcomes: [{ type: "act", action: action() }],
+    decide: async () => {
+      decisions++;
+      return decision;
+    },
+    executeAction: async () => {
+      started.resolve();
+      await finish.promise;
+      return changed();
+    },
+  });
+  try {
+    let settled = false;
+    const running = instance.session.run({ signal: controller.signal });
+    const rejected = assert.rejects(running, SessionCancelledError);
+    void running.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await started.promise;
+    controller.abort();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(settled, false);
+    finish.resolve();
+    await rejected;
+    assert.equal(decisions, 1);
+    assert.equal(instance.seen.actions.length, 1);
+    assert.equal(
+      (await instance.session.observe()).trace.length,
+      1,
+      "an action that was running when the request was cancelled is still recorded",
+    );
+  } finally {
+    finish.resolve();
+    await instance.session.close();
+  }
+});
+
+test("R10: closing a session waits for every tab before removing its handoff directory, also when one tab fails to close", async () => {
+  for (const fails of [false, true]) {
+    const directory = await mkdtemp(join(tmpdir(), "jevpilot-r10-close-"));
+    const popup = new FakePageHandle();
+    const tabStarted = r10Deferred();
+    const tabFinished = r10Deferred();
+    const screenshotStarted = r10Deferred();
+    const screenshotFinished = r10Deferred();
+    const failure = new Error("original tab close failed");
+    const instance = fixture({
+      options: { budget: { steps: 1 } },
+      outcomes: [{ type: "act", action: action() }],
+      tempDir: async () => directory,
+      execute: () => {
+        instance.page.emit("popup", popup);
+        return changed();
+      },
+    });
+    try {
+      assert.equal((await instance.session.run()).status, "BUDGET_EXHAUSTED");
+      assert.equal(instance.session.page, popup);
+      assert.equal(existsSync(join(directory, "handoff-1.png")), true);
+      popup.screenshot = async () => {
+        screenshotStarted.resolve();
+        await screenshotFinished.promise;
+        return new Uint8Array([1, 2, 3]);
+      };
+      const handoff = instance.session.resume();
+      await screenshotStarted.promise;
+      let originalClosed = false;
+      instance.page.close = async () => {
+        originalClosed = true;
+        if (fails) throw failure;
+      };
+      popup.close = async () => {
+        tabStarted.resolve();
+        await tabFinished.promise;
+      };
+      let settled = false;
+      const closing = instance.session.close();
+      const outcome = closing.then(
+        () => {
+          settled = true;
+          return undefined;
+        },
+        (error: unknown) => {
+          settled = true;
+          return error;
+        },
+      );
+      await tabStarted.promise;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(originalClosed, true);
+      assert.equal(settled, false);
+      assert.equal(existsSync(directory), true);
+      screenshotFinished.resolve();
+      assert.equal((await handoff).screenshot_path, undefined);
+      // Give a premature cleanup enough time to finish, while the second tab is still blocked.
+      await new Promise<void>((resolve) => setTimeout(resolve, 30));
+      assert.equal(settled, false, "close must still wait for the second tab");
+      assert.equal(existsSync(directory), true);
+      tabFinished.resolve();
+      assert.equal(await outcome, fails ? failure : undefined);
+      assert.equal(existsSync(directory), false);
+    } finally {
+      tabFinished.resolve();
+      screenshotFinished.resolve();
+      await instance.session.close().catch(() => {});
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test("R10: a failed handoff directory creation is retried at the next handoff", async () => {
+  const root = await mkdtemp(join(tmpdir(), "jevpilot-r10-retry-"));
+  const directory = join(root, "handoff");
+  let attempts = 0;
+  const instance = fixture({
+    outcomes: [{ type: "handoff", reason: "needs_values", source: "code", details: {} }],
+    tempDir: async () => {
+      if (++attempts === 1) throw new Error("temporary directory failure");
+      await mkdir(directory);
+      return directory;
+    },
+  });
+  instance.page.screenshot = async () => new Uint8Array([1, 2, 3]);
+  try {
+    assert.equal((await instance.session.run()).screenshot_path, undefined);
+    assert.equal(attempts, 1);
+    const retried = await instance.session.resume();
+    assert.equal(attempts, 2);
+    assert.equal(retried.screenshot_path, join(directory, "handoff-0.png"));
+    assert.deepEqual([...(await readFile(retried.screenshot_path!))], [1, 2, 3]);
+    assert.equal((await instance.session.resume()).screenshot_path, retried.screenshot_path);
+    assert.equal(attempts, 2);
+  } finally {
+    await instance.session.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("R10: typing the same value repeatedly sends it to the decision model once", async () => {
+  const field = element("Search", "textbox", { tag: "input", inputType: "search" });
+  const urls = ["http://example.test/start", "http://example.test/next"];
+  let url = urls[0]!;
+  const requests: unknown[] = [];
+  const instance = fixture({
+    observe: async () => observation([field], "page", url),
+    buildDecisionState: (context) => ({
+      state: {
+        typedValues: context.typedValues,
+        futileSubmits: [...(context.futileSubmits ?? [])],
+      },
+      questions: {},
+      reductions: [],
+    }),
+    decide: async (request) => {
+      requests.push(request.state);
+      return decision;
+    },
+  });
+  try {
+    for (const currentUrl of urls) {
+      url = currentUrl;
+      for (const text of ["first", "first", "second", "first"]) {
+        await instance.session.act([{ action: "type", ref: field.ref, text, submit: true }]);
+      }
+      await instance.session.run();
+    }
+    assert.equal(instance.seen.actions.length, 8);
+    assert.deepEqual(
+      requests,
+      urls.map((_, index) => ({
+        typedValues: ["first", "second"],
+        futileSubmits: urls.slice(0, index + 1).flatMap((url) => [
+          { url, value: "first" },
+          { url, value: "second" },
+        ]),
+      })),
+    );
+  } finally {
+    await instance.session.close();
+  }
+});
 
 test("M6t: the session passes its typed values to the policy", async () => {
   const seen: string[][] = [];
@@ -648,11 +876,13 @@ test("M6u: a password field or a secret value is never recorded as a futile subm
   }
 });
 
-test("M6g: date-like values are normalized or refused", async () => {
+test("R10: date values with a one-digit month or day, or a year before 100, are normalized", async () => {
   for (const [type, value, expected] of [
     ["date", "2026/10/15", "2026-10-15"],
     ["date", "2026.10.15", "2026-10-15"],
     ["date", "2026年10月15日", "2026-10-15"],
+    ["date", "2026-1-1", "2026-01-01"],
+    ["date", "0050-01-01", "0050-01-01"],
     ["time", "09:42:03", "09:42:03"],
     ["datetime-local", "2026/10/15 09:42", "2026-10-15T09:42"],
     ["month", "2026-10", "2026-10"],

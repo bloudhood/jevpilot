@@ -5,7 +5,13 @@ import type { ChildProcess } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { BrowserConfigError, DialogBlockingError } from "../../src/browser/errors.ts";
+import {
+  BrowserConfigError,
+  CdpTimeoutError,
+  DialogBlockingError,
+} from "../../src/browser/errors.ts";
+import { CdpClient } from "../../src/browser/cdp/client.ts";
+import { BrowserInstance } from "../../src/browser/launcher.ts";
 import { createCdpDriver } from "../../src/engine/cdp/driver.ts";
 import { FrameGoneError, type BrowserHandle, type PageEvents } from "../../src/engine/types.ts";
 import { fakeCdp, type Message, type Send } from "../browser/fake-cdp.ts";
@@ -925,6 +931,69 @@ test("R9: behind a configured proxy private mode lets an unverified host load", 
     await browser?.close();
     await fake.close();
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test(
+  "R10: an upload that times out still releases its remote object",
+  { timeout: 3000 },
+  async () => {
+    const host = await fixture();
+    const directory = await mkdtemp(join(tmpdir(), "jevpilot-r10-upload-"));
+    const file = join(directory, "sample.txt");
+    const original = CdpClient.prototype.call;
+    const timeout = new CdpTimeoutError("upload", "s1");
+    const releases: unknown[] = [];
+    CdpClient.prototype.call = function (this: CdpClient, ...args: Parameters<typeof original>) {
+      if (args[0] === "DOM.setFileInputFiles") return Promise.reject(timeout);
+      if (args[0] === "Runtime.releaseObject") {
+        releases.push(args[1]);
+        return new Promise(() => {});
+      }
+      return original.apply(this, args);
+    } as typeof original;
+    try {
+      await writeFile(file, "content");
+      await assert.rejects(
+        host.page.setInputFiles(() => document.querySelector("input"), [], [file]),
+        (error: unknown) => error instanceof Error && error.cause === timeout,
+      );
+      assert.deepEqual(releases, [{ objectId: "object-1" }]);
+    } finally {
+      CdpClient.prototype.call = original;
+      await host.close();
+      await rm(directory, { recursive: true });
+    }
+  },
+);
+
+test("R10: the driver forgets a page whose target is gone", async () => {
+  const original = BrowserInstance.prototype.newPage;
+  let instance: BrowserInstance | undefined;
+  BrowserInstance.prototype.newPage = function (...args) {
+    instance = this;
+    return original.apply(this, args);
+  };
+  let host: Awaited<ReturnType<typeof fixture>> | undefined;
+  try {
+    host = await fixture();
+    assert.ok(instance);
+    const session = [...instance.sessions][0]!;
+    instance.sessions.delete(session);
+    assert.deepEqual(host.browser.pages(), []);
+    instance.sessions.add(session);
+    assert.deepEqual(
+      host.browser.pages(),
+      [],
+      "a forgotten page cannot reappear from the retained map",
+    );
+    assert.equal(
+      host.sent.some((message) => message.method === "Target.disposeBrowserContext"),
+      false,
+    );
+  } finally {
+    BrowserInstance.prototype.newPage = original;
+    await host?.close();
   }
 });
 

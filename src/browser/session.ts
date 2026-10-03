@@ -75,13 +75,24 @@ export class BrowserSession {
         throw error;
       });
     const frameId = tree?.frameTree.frame.id;
+    const responses: ProtocolMapping.Events["Network.responseReceived"][0][] = [];
+    let navigationFrameId: string | undefined;
+    let navigationLoaderId: string | undefined;
+    const matchesNavigation = (received: ProtocolMapping.Events["Network.responseReceived"][0]) =>
+      navigationFrameId
+        ? received.frameId === navigationFrameId
+        : Boolean(navigationLoaderId) && received.loaderId === navigationLoaderId;
     let response: ProtocolMapping.Events["Network.responseReceived"][0] | undefined;
     const offResponse = this.client.on(
       "Network.responseReceived",
       (event) => {
         const received = event as ProtocolMapping.Events["Network.responseReceived"][0];
-        if (received.type === "Document" && (!frameId || received.frameId === frameId))
-          response = received;
+        if (received.type === "Document") {
+          if (!frameId) {
+            responses.push(received);
+            if (matchesNavigation(received)) response = received;
+          } else if (received.frameId === frameId) response = received;
+        }
       },
       this.sessionId,
     );
@@ -103,7 +114,12 @@ export class BrowserSession {
       const [loaded, navigation] = await Promise.all([
         lifecycle,
         this.client.call("Page.navigate", { url }, this.sessionId, timeoutMs).then(
-          (result) => ({ failure: result.errorText ? "navigation_error" : undefined }),
+          (result) => {
+            navigationFrameId = result.frameId;
+            navigationLoaderId = result.loaderId;
+            if (!frameId) response = responses.findLast(matchesNavigation);
+            return { failure: result.errorText ? "navigation_error" : undefined };
+          },
           (error: unknown) => {
             if (error instanceof CdpTimeoutError) return { failure: "timeout" };
             throw error;

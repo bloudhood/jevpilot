@@ -91,6 +91,11 @@ const chineseExclusions = [
   "付款方式",
 ];
 
+const englishExpressions = englishTerms.map(
+  (term) =>
+    [term, new RegExp(`(?:^|[^a-z])${term.replaceAll(" ", "\\s+")}(?:$|[^a-z])`, "iu")] as const,
+);
+
 export function detectorMarkerSelectors(): string[] {
   return [
     ...new Set(
@@ -236,8 +241,7 @@ export function irreversibleMatch(rawName: string): string | undefined {
   const name = rawName.trim().toLowerCase();
   if (name === "post" || name === "send" || /^send\s+(?!code\b|verification\s+code\b)/iu.test(name))
     return name === "post" ? "post" : "send";
-  for (const term of englishTerms) {
-    const expression = new RegExp(`(?:^|[^a-z])${term.replaceAll(" ", "\\s+")}(?:$|[^a-z])`, "iu");
+  for (const [term, expression] of englishExpressions) {
     if (expression.test(name)) return term;
   }
   for (const term of chineseTerms) {
