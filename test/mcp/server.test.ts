@@ -920,7 +920,9 @@ test("unexpected engine errors are diagnosed without exposing secrets", async ()
     assert.match(text(failed), /Tool failed \(TypeError\)/u);
     assert.equal(writes.length, 1);
     assert.match(writes[0]!, /tool=browser_run error=TypeError/u);
-    assert.match(writes[0]!, /frame=.*src[\\/]mcp[\\/]server\.ts:\d+/u);
+    // M7a: the launch await chain moved verbatim from server.ts to host.ts, so the first src/
+    // frame in the logged stack moved with it. The log format itself is unchanged.
+    assert.match(writes[0]!, /frame=.*src[\\/]mcp[\\/](?:server|host)\.ts:\d+/u);
     assert.doesNotMatch(`${writes.join("")} ${JSON.stringify(failed)}`, /SECRET_MARKER/u);
   } finally {
     process.stderr.write = write;

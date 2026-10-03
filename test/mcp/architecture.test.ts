@@ -25,3 +25,62 @@ test("only MCP source imports orchestrator and MCP source does not import CDP", 
     } else assert.doesNotMatch(source, /from ["'][^"']*(?:browser\/|engine\/cdp\/)/u);
   }
 });
+
+test("M7a: tool modules import only allowed modules", async () => {
+  const toolsDirectory = new URL("../../src/mcp/tools/", import.meta.url);
+  const entries = await readdir(toolsDirectory, { withFileTypes: true });
+  const allowed = [
+    /^zod$/u,
+    /^node:(?:crypto|path|fs\/promises)$/u,
+    /^@modelcontextprotocol\/sdk\/types\.js$/u,
+    /^\.\.\/host\.ts$/u,
+    /^\.\.\/schemas\.ts$/u,
+    /^\.\.\/errors\.ts$/u,
+    /^\.\.\/thresholds\.ts$/u,
+    /^\.\.\/\.\.\/orchestrator\/session\.ts$/u,
+    /^\.\.\/\.\.\/orchestrator\/result\.ts$/u,
+    /^\.\.\/\.\.\/engine\/types\.ts$/u,
+    /^\.\.\/\.\.\/decision\/types\.ts$/u,
+    /^\.\/[A-Za-z0-9_-]+\.ts$/u,
+  ];
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith(".ts")) continue;
+    const source = await readFile(new URL(entry.name, toolsDirectory), "utf8");
+    const specifiers = [
+      ...[...source.matchAll(/from ["']([^"']+)["']/gu)].map((match) => match[1]!),
+      ...[...source.matchAll(/import ["']([^"']+)["'];/gu)].map((match) => match[1]!),
+    ];
+    for (const specifier of specifiers) {
+      assert.ok(
+        allowed.some((pattern) => pattern.test(specifier)),
+        `${entry.name} imports a module outside the allowlist: ${specifier}`,
+      );
+    }
+  }
+});
+
+test("M7a: tool modules keep no module-level mutable state", async () => {
+  const toolsDirectory = new URL("../../src/mcp/tools/", import.meta.url);
+  const entries = await readdir(toolsDirectory, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith(".ts")) continue;
+    const source = await readFile(new URL(entry.name, toolsDirectory), "utf8");
+    const topLevel = source
+      .split(/\r?\n/u)
+      .filter((line) => /^[^ \t}]/u.test(line) && !line.startsWith("//"));
+    for (const line of topLevel) {
+      assert.doesNotMatch(line, /^let /u, `${entry.name} keeps a module-level let: ${line}`);
+      assert.doesNotMatch(line, /^var /u, `${entry.name} keeps a module-level var: ${line}`);
+      assert.doesNotMatch(
+        line,
+        /new Map\(/u,
+        `${entry.name} keeps module-level mutable state: ${line}`,
+      );
+      assert.doesNotMatch(
+        line,
+        /new Set\(/u,
+        `${entry.name} keeps module-level mutable state: ${line}`,
+      );
+    }
+  }
+});
