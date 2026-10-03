@@ -2,6 +2,21 @@
 
 This project follows Keep a Changelog. Versions use Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- `browser_screenshot` captures the current tab of a session as a JPEG: the visible viewport or one element by `ref` from the latest observation. It returns the image plus one line of JSON, or saves the file and returns only its path, and it refuses sessions that use secret values.
+- `JEVPILOT_IMAGE_RESPONSES`, `JEVPILOT_SCREENSHOT_DIR` and `JEVPILOT_DISABLED_TOOLS` configure screenshot delivery, a persistent directory for saved screenshots and the set of registered tools.
+
+### Changed
+
+- Handoff screenshots are also skipped while a session holds unused `secret_ref` values, matching the screenshot tool's rule.
+
+### Fixed
+
+- Screenshot files are JPEG; the handoff and observation file extension changed from `.png` to `.jpg`.
+
 ## [0.2.2] - 2026-10-03
 
 Faster observations on long pages and ad-heavy pages; ad frames are no longer observed.

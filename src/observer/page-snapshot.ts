@@ -671,6 +671,94 @@ export function resolveRef(
     );
 }
 
+export async function locateRef(
+  page: PageHandle,
+  epoch: number,
+  ref: string,
+  fingerprint: string,
+): Promise<RefResolution> {
+  const resolve = (): Promise<RefResolution> => {
+    if (ref.startsWith("frame:")) {
+      const separator = ref.indexOf("/");
+      const marker = ref.lastIndexOf("@", separator);
+      const frameId = ref.slice(6, marker);
+      return page.frames().then(async (frames) => {
+        const frame = frames.find((item) => item.id === frameId);
+        if (!frame) return { status: "missing" as const };
+        try {
+          await frame.callIsolated(installObserverLibrary, []);
+        } catch (error) {
+          if (error instanceof FrameGoneError) return { status: "missing" as const };
+          throw error;
+        }
+        let result: RefResolution;
+        try {
+          result = await frame.callIsolated(resolveRefInPage, [
+            Number(ref.slice(marker + 1, separator)),
+            ref.slice(separator + 1),
+            fingerprint,
+            false,
+            false,
+          ] as [number, string, string, boolean, boolean]);
+        } catch (error) {
+          if (error instanceof FrameGoneError) return { status: "missing" as const };
+          throw error;
+        }
+        return result.rect
+          ? {
+              ...result,
+              rect: mapFrameRect(result.rect, frame.offset),
+            }
+          : result;
+      });
+    }
+    return page
+      .callIsolated(installObserverLibrary, [])
+      .then(() => page.callIsolated(resolveRefInPage, [epoch, ref, fingerprint, false, false]));
+  };
+  const result = await resolve();
+  if (result.status !== "ok" || !result.rect) return result;
+  // Bring a partly off-screen element fully into the viewport, then resolve again: screenshots
+  // clip to the viewport, unlike clicks.
+  let offscreen: boolean;
+  try {
+    offscreen = await page.callIsolated(refOutsideViewport, [epoch, ref]);
+  } catch {
+    return result;
+  }
+  if (!offscreen) return result;
+  try {
+    await page.callIsolated(scrollRefIntoView, [epoch, ref]);
+  } catch {
+    return result;
+  }
+  return resolve();
+}
+
+function refOutsideViewport(epoch: number, ref: string): boolean {
+  const registry = (
+    globalThis as typeof globalThis & {
+      __jevpilotObserverRegistry?: { epoch: number; refs: Map<string, WeakRef<Element>> };
+    }
+  ).__jevpilotObserverRegistry;
+  if (registry?.epoch !== epoch) return false;
+  const element = registry.refs.get(ref)?.deref();
+  if (!element?.isConnected) return false;
+  const box = element.getBoundingClientRect();
+  return box.left < 0 || box.top < 0 || box.right > innerWidth || box.bottom > innerHeight;
+}
+
+function scrollRefIntoView(epoch: number, ref: string): void {
+  const registry = (
+    globalThis as typeof globalThis & {
+      __jevpilotObserverRegistry?: { epoch: number; refs: Map<string, WeakRef<Element>> };
+    }
+  ).__jevpilotObserverRegistry;
+  if (registry?.epoch !== epoch) return;
+  const element = registry.refs.get(ref)?.deref();
+  if (element?.isConnected) element.scrollIntoView({ block: "center", inline: "center" });
+}
+
 export function waitForRef(
   page: PageHandle,
   epoch: number,

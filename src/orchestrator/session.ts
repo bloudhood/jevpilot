@@ -28,8 +28,11 @@ import {
   type Finding,
 } from "../detectors/detect.ts";
 import {
+  EmptyCaptureError,
   NavigationInProgressError,
   PageUnresponsiveError,
+  type Capture,
+  type CaptureOptions,
   type NavigationResult,
   type PageEvents,
   type PageHandle,
@@ -39,7 +42,7 @@ import type { Action, ActionResult, Target } from "../executor/types.ts";
 import { formatObservation } from "../observer/format.ts";
 import { pageMatches } from "../observer/matches.ts";
 import { observe } from "../observer/observe.ts";
-import { formSubmitNames } from "../observer/page-snapshot.ts";
+import { formSubmitNames, locateRef } from "../observer/page-snapshot.ts";
 import type { Observation, ObserveOptions } from "../observer/types.ts";
 import type { SessionResult, SessionStatus, SessionTrace } from "./result.ts";
 import {
@@ -810,7 +813,7 @@ export class OrchestratorSession {
       !this.pageUnresponsive &&
       this.page.capabilities.screenshots &&
       !this.closed &&
-      this.secretLiterals.size === 0
+      this.screenshotAllowed()
     ) {
       const write = (async () => {
         try {
@@ -820,7 +823,7 @@ export class OrchestratorSession {
           });
           this.directory ??= await this.directoryCreation;
           if (this.closed) return;
-          const path = join(this.directory, `handoff-${this.steps}.png`);
+          const path = join(this.directory, `handoff-${this.steps}.jpg`);
           await writeFile(path, await this.page.screenshot());
           if (!this.closed) result.screenshot_path = path;
         } catch {
@@ -2654,6 +2657,66 @@ export class OrchestratorSession {
     }
     return this.observe("compact");
   }
+  /** True when no secret_ref value exists and no secret literal has been read. */
+  screenshotAllowed(): boolean {
+    return !Object.values(this.values).some(isSecret) && this.secretLiterals.size === 0;
+  }
+
+  async screenshot(options: { ref?: string; quality?: number } = {}): Promise<
+    | { ok: true; capture: Capture; url: string; title: string }
+    | {
+        ok: false;
+        reason: "secrets" | "unsupported" | "unknown_ref" | "not_visible" | "unresponsive";
+      }
+  > {
+    this.beginInvocation();
+    this.switchPendingPopup();
+    if (!this.screenshotAllowed()) return { ok: false, reason: "secrets" };
+    if (!this.page.capabilities.screenshots || !this.page.capture)
+      return { ok: false, reason: "unsupported" };
+    let clip: CaptureOptions["clip"] | undefined;
+    if (options.ref !== undefined) {
+      const observation = this.lastObservation;
+      const element = observation?.elements.find((item) => item.ref === options.ref);
+      if (!observation || !element) return { ok: false, reason: "unknown_ref" };
+      const resolution = await locateRef(
+        this.page,
+        observation.epoch,
+        options.ref,
+        element.fingerprint,
+      );
+      if (resolution.status !== "ok" || !resolution.rect)
+        return { ok: false, reason: "unknown_ref" };
+      clip = {
+        x: resolution.rect.x,
+        y: resolution.rect.y,
+        width: resolution.rect.width,
+        height: resolution.rect.height,
+      };
+    }
+    let capture: Capture;
+    try {
+      capture = await this.page.capture({
+        ...(options.quality !== undefined ? { quality: options.quality } : {}),
+        ...(clip ? { clip } : {}),
+      });
+    } catch (error) {
+      if (error instanceof EmptyCaptureError) return { ok: false, reason: "not_visible" };
+      if (error instanceof PageUnresponsiveError) return { ok: false, reason: "unresponsive" };
+      throw error;
+    }
+    const url = await this.page.targetUrl?.().catch(() => undefined);
+    const title = await this.page
+      .callIsolated(() => document.title, [], { timeoutMs: 1000 })
+      .catch(() => "");
+    return {
+      ok: true,
+      capture,
+      url: url ?? this.lastObservation?.url ?? "",
+      title,
+    };
+  }
+
   async reclaimIdle(): Promise<boolean> {
     if (this.closed || this.deps.now() - this.updatedAt < this.idleTimeoutMs) return false;
     await this.close();

@@ -19,6 +19,10 @@ The source is organized around ownership boundaries:
 
 The dependency direction is enforced by test/engine/architecture.test.ts, test/orchestrator/architecture.test.ts and test/mcp/architecture.test.ts. Non-driver source modules cannot import CDP implementation or protocol types. Executors depend on engine interfaces and observer modules. Detectors and policy have restricted imports.
 
+## MCP module layout
+
+`src/mcp/server.ts` only assembles the server: it builds a `ToolHost`, mounts the built-in tool modules in a fixed order and returns. All mutable state lives in `src/mcp/host.ts` (the session table, browser lifecycle, serial execution per session, close bookkeeping and per-session temporary directories). `src/mcp/dispatch.ts` registers tools and owns the `tools/call` handler with its result and error mapping, and `src/mcp/schemas.ts` holds the shared zod fragments. Each tool is one module under `src/mcp/tools/` (run, resume, observe, screenshot, act, navigate, tabs, close, decide) that registers itself through the host. Tool modules may import only an allowlisted set of modules and keep no module-level mutable state; test/mcp/architecture.test.ts enforces both.
+
 ## One run, end to end
 
 1. The MCP layer validates browser_run input. If no decision port exists, it returns FAILED with decision_port_not_configured before launching a browser.

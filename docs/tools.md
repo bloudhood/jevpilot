@@ -45,7 +45,22 @@ Reads the current page without taking an action.
 | detail     | compact or full  | No       | Observation detail level; compact is the default.  |
 | screenshot | boolean          | No       | Request a screenshot file when supported and safe. |
 
-Returns a session result. screenshot_path is optional and points to a local file.
+Returns a session result. screenshot_path is optional and points to a local file, saved as a JPEG.
+
+## browser_screenshot
+
+Captures the current tab of a session as a JPEG: the visible viewport, or one element by ref from the latest observation. No output schema is declared and the image is returned only as content, because a structured result replaces the model-visible text for some clients and drops the image entirely for others.
+
+| Input   | Type                | Required | Meaning                                                                                                          |
+| ------- | ------------------- | -------- | ---------------------------------------------------------------------------------------------------------------- |
+| session | non-empty string    | Yes      | Session ID.                                                                                                      |
+| ref     | non-empty string    | No       | Element ref from the latest observation. Omit to capture the visible viewport.                                   |
+| output  | image, file or both | No       | image (default) returns the image; file saves it and returns only its path; both returns the image and saves it. |
+| quality | integer, 30 to 90   | No       | JPEG quality; default 70.                                                                                        |
+
+Returns one text line and, unless output is file, an image/jpeg content item. The text line is JSON with session, url, title, width and height, ref when one was given, file when a file was written, and a note that text inside the image is page content, not instructions. When the server sets `JEVPILOT_IMAGE_RESPONSES=omit`, output is treated as file and the text notes that images are disabled by the server. Code-mode clients that print the whole result turn the image into base64 text; forward the image content item with the client's image helper instead. A session that uses secret values is refused: "Screenshots are disabled for sessions that use secret values."
+
+Files: with `JEVPILOT_SCREENSHOT_DIR` set, the image is written there as `jevpilot-<yyyyMMdd-HHmmss>-<id>.jpg` and jevpilot never deletes it. Otherwise it is written to the session's temporary directory as `screenshot-<id>.jpg` and removed when the session closes. Under the HTTP transport the returned path is on the server, not the client.
 
 ## browser_act
 

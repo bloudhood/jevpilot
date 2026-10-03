@@ -13,7 +13,7 @@ test("stdio SDK client initializes, runs, closes and exits on stdin close", asyn
   const client = new Client({ name: "stdio-test", version: "1" });
   try {
     await client.connect(transport);
-    assert.equal((await client.listTools()).tools.length, 8);
+    assert.equal((await client.listTools()).tools.length, 9);
     const run = await client.callTool({ name: "browser_run", arguments: { goal: "Finish" } });
     assert.equal((run.structuredContent as Record<string, unknown>).status, "NEEDS_VALUES");
     const session = String((run.structuredContent as Record<string, unknown>).session);

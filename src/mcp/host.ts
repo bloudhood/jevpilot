@@ -46,6 +46,9 @@ export type McpDeps = {
   sessionOptions?: Pick<SessionOptions, "idleTimeoutMs" | "autoPassWindowMs">;
   idleReclaimIntervalMs?: number;
   screenshotTempDir?: () => Promise<string>;
+  imageResponses?: "allow" | "omit";
+  screenshotDir?: string;
+  disabledTools?: string[];
 };
 
 export class BrowserDisconnectedError extends Error {

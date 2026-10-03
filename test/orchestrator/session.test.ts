@@ -211,7 +211,7 @@ test("R10: closing a session waits for every tab before removing its handoff dir
     try {
       assert.equal((await instance.session.run()).status, "BUDGET_EXHAUSTED");
       assert.equal(instance.session.page, popup);
-      assert.equal(existsSync(join(directory, "handoff-1.png")), true);
+      assert.equal(existsSync(join(directory, "handoff-1.jpg")), true);
       popup.screenshot = async () => {
         screenshotStarted.resolve();
         await screenshotFinished.promise;
@@ -281,7 +281,7 @@ test("R10: a failed handoff directory creation is retried at the next handoff", 
     assert.equal(attempts, 1);
     const retried = await instance.session.resume();
     assert.equal(attempts, 2);
-    assert.equal(retried.screenshot_path, join(directory, "handoff-0.png"));
+    assert.equal(retried.screenshot_path, join(directory, "handoff-0.jpg"));
     assert.deepEqual([...(await readFile(retried.screenshot_path!))], [1, 2, 3]);
     assert.equal((await instance.session.resume()).screenshot_path, retried.screenshot_path);
     assert.equal(attempts, 2);
@@ -5814,5 +5814,34 @@ test("R6: a dialog that is already gone no longer holds the session", async () =
     assert.equal((await failing.session.observe()).status, "CONFIRM_REQUIRED");
   } finally {
     await failing.session.close();
+  }
+});
+
+test("M7b: handoff screenshots are skipped while a session holds unused secret refs", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "jevpilot-m7b-secret-handoff-"));
+  const instance = fixture({
+    outcomes: [{ type: "handoff", reason: "needs_values", source: "code", details: {} }],
+    options: {
+      values: {
+        password: { secret_ref: "env:JEVPILOT_SECRET_M7B", origins: ["http://example.test"] },
+      },
+    },
+    tempDir: async () => directory,
+  });
+  instance.page.screenshot = async () => {
+    throw new Error("no screenshot may be taken while unused secret refs are held");
+  };
+  try {
+    const result = await instance.session.run();
+    assert.equal(result.status, "NEEDS_VALUES");
+    assert.equal(result.screenshot_path, undefined);
+    assert.equal(
+      existsSync(join(directory, "handoff-0.jpg")),
+      false,
+      "no handoff screenshot is written",
+    );
+  } finally {
+    await instance.session.close();
+    await rm(directory, { recursive: true, force: true });
   }
 });

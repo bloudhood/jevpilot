@@ -766,6 +766,7 @@ test("MCP tools list schemas and round-trip all tools without a browser", async 
         "browser_run",
         "browser_resume",
         "browser_observe",
+        "browser_screenshot",
         "browser_act",
         "browser_navigate",
         "browser_tabs",
@@ -775,7 +776,8 @@ test("MCP tools list schemas and round-trip all tools without a browser", async 
     );
     for (const tool of tools) {
       assert.equal(tool.inputSchema.type, "object");
-      assert.equal(tool.outputSchema?.type, "object");
+      if (tool.name !== "browser_screenshot") assert.equal(tool.outputSchema?.type, "object");
+      else assert.equal(tool.outputSchema, undefined);
       assert.ok(tool.description);
     }
     assert.equal(deps.launches(), 0);
@@ -940,7 +942,7 @@ test("decision tool is conditional and orchestrator FAILED remains a normal resu
   await app.server.connect(right);
   await client.connect(left);
   try {
-    assert.equal((await client.listTools()).tools.length, 7);
+    assert.equal((await client.listTools()).tools.length, 8);
     const failed = await client.callTool({ name: "browser_run", arguments: { goal: "Finish" } });
     assert.equal(data(failed).status, "FAILED");
     assert.equal(data(failed).reason, "decision_port_not_configured");

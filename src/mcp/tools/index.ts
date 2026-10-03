@@ -6,6 +6,7 @@ import navigate from "./navigate.ts";
 import observe from "./observe.ts";
 import resume from "./resume.ts";
 import run from "./run.ts";
+import screenshot from "./screenshot.ts";
 import tabs from "./tabs.ts";
 
 export type ToolModule = {
@@ -20,6 +21,7 @@ export const builtinTools: ToolModule[] = [
   run,
   resume,
   observe,
+  screenshot,
   act,
   navigate,
   tabs,
