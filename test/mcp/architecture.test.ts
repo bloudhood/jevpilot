@@ -59,6 +59,16 @@ test("M7a: tool modules import only allowed modules", async () => {
   }
 });
 
+function checkModuleStateLine(line: string, file = "sample"): void {
+  assert.doesNotMatch(line, /^let /u, `${file} keeps a module-level let: ${line}`);
+  assert.doesNotMatch(line, /^var /u, `${file} keeps a module-level var: ${line}`);
+  assert.doesNotMatch(
+    line,
+    /new (?:Map|Set|WeakMap|WeakSet)\b/u,
+    `${file} keeps module-level mutable state: ${line}`,
+  );
+}
+
 test("M7a: tool modules keep no module-level mutable state", async () => {
   const toolsDirectory = new URL("../../src/mcp/tools/", import.meta.url);
   const entries = await readdir(toolsDirectory, { withFileTypes: true });
@@ -69,18 +79,16 @@ test("M7a: tool modules keep no module-level mutable state", async () => {
       .split(/\r?\n/u)
       .filter((line) => /^[^ \t}]/u.test(line) && !line.startsWith("//"));
     for (const line of topLevel) {
-      assert.doesNotMatch(line, /^let /u, `${entry.name} keeps a module-level let: ${line}`);
-      assert.doesNotMatch(line, /^var /u, `${entry.name} keeps a module-level var: ${line}`);
-      assert.doesNotMatch(
-        line,
-        /new Map\(/u,
-        `${entry.name} keeps module-level mutable state: ${line}`,
-      );
-      assert.doesNotMatch(
-        line,
-        /new Set\(/u,
-        `${entry.name} keeps module-level mutable state: ${line}`,
-      );
+      checkModuleStateLine(line, entry.name);
     }
   }
+});
+
+test("M7c: the module-state check catches generic Map and Set", () => {
+  assert.throws(
+    () => checkModuleStateLine("const seen = new Map<string, number>();"),
+    assert.AssertionError,
+  );
+  assert.throws(() => checkModuleStateLine("const s = new Set<string>();"), assert.AssertionError);
+  assert.doesNotThrow(() => checkModuleStateLine("const tool: ToolModule = {"));
 });

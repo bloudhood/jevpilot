@@ -2,6 +2,19 @@
 
 This project follows Keep a Changelog. Versions use Semantic Versioning.
 
+## [0.3.1] - 2026-10-04
+
+Fixes for element screenshots found in a review of 0.3.0. No configuration changes.
+
+### Fixed
+
+- `browser_screenshot` of an element:
+  - It captures the element's whole box; a link that wraps over several lines was cut to its first line.
+  - It scrolls the page when the frame holding the element is below the fold.
+  - It reports an element that is no longer painted (`opacity: 0`, `visibility: hidden`, `display: none`) as not visible instead of returning what lies behind it.
+  - After a screenshot that scrolled, the next hover or drag uses fresh coordinates.
+- After a browser disconnect, `browser_screenshot` returns an error instead of a structured result. A frame that stops responding while an element is being located is reported as an unresponsive page.
+
 ## [0.3.0] - 2026-10-04
 
 The agent can now see the page: `browser_screenshot` returns the page or one element as an image, or saves it for the user. Tools can be switched off by configuration.

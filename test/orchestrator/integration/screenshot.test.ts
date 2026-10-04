@@ -9,6 +9,7 @@ import { MockDecider } from "../../../src/decision/mock.ts";
 import { createCdpDriver } from "../../../src/engine/cdp/driver.ts";
 import type { BrowserHandle } from "../../../src/engine/types.ts";
 import { OrchestratorSession } from "../../../src/orchestrator/session.ts";
+import { locateRef } from "../../../src/observer/page-snapshot.ts";
 import { testProfile } from "../../support/browser-profile.ts";
 
 const executable = process.env.JEVPILOT_SKIP_BROWSER === "1" ? undefined : await findChrome();
@@ -51,6 +52,18 @@ describe("M7b browser_screenshot local fixture", { skip: skipped }, () => {
   before(async () => {
     crossServer = createServer((request, response) => {
       response.setHeader("content-type", "text/html; charset=utf-8");
+      if (request.url === "/top") {
+        response.end(
+          '<!doctype html><style>html,body{margin:0}</style><button style="box-sizing:border-box;width:180px;height:70px">Top frame target</button>',
+        );
+        return;
+      }
+      if (request.url === "/offset-inner") {
+        response.end(
+          '<!doctype html><style>html,body{margin:0}</style><button style="position:absolute;left:30px;top:40px;width:150px;height:90px">Offset target</button>',
+        );
+        return;
+      }
       if (request.url === "/deep") {
         response.end(
           "<!doctype html><title>Deep frame</title><style>html,body{margin:0}</style>" +
@@ -76,6 +89,14 @@ describe("M7b browser_screenshot local fixture", { skip: skipped }, () => {
       response.setHeader("content-type", "text/html; charset=utf-8");
       const path = (request.url ?? "/").split("?")[0];
       const pages: Record<string, string> = {
+        "/below-frame":
+          '<!doctype html><style>html,body{margin:0}</style><div style="height:900px"></div>' +
+          `<iframe src="${crossSiteBase}/top" style="width:400px;height:300px;border:0"></iframe>`,
+        "/offset-frame":
+          "<!doctype html><style>html,body{margin:0}</style>" +
+          `<iframe src="${crossSiteBase}/offset-inner" style="position:absolute;left:200px;top:150px;width:400px;height:300px;border:0"></iframe>`,
+        "/wrapped":
+          '<!doctype html><style>html,body{margin:0}a{line-height:20px}</style><div style="width:120px"><a href="#">A long inline link with enough words to wrap onto many separate lines for capture</a></div>',
         "/viewport":
           "<!doctype html><title>Viewport</title><style>html,body{margin:0}</style>" +
           '<p>Viewport fixture</p><div style="height:3000px;width:100%"></div>',
@@ -293,6 +314,102 @@ describe("M7b browser_screenshot local fixture", { skip: skipped }, () => {
       assert.ok(elapsed < 1000, `screenshot took ${elapsed}ms with a dialog open`);
     } finally {
       await session.page.handleDialog(false);
+      await session.close();
+    }
+  });
+
+  test("M7c: ref screenshot of an iframe element below the fold scrolls the page", async () => {
+    const session = await opened("/below-frame");
+    try {
+      await session.observe();
+      const target = observed(session, "Top frame target");
+      assert.match(target.ref, /^frame:/u);
+      assert.equal(await session.page.callIsolated(() => scrollY, []), 0);
+      const result = await session.screenshot({ ref: target.ref });
+      assert.ok(result.ok, JSON.stringify(result));
+      const size = jpegSize(result.capture.data);
+      assert.ok(Math.abs(size.width - 180) <= 1, `image width ${size.width}`);
+      assert.ok(Math.abs(size.height - 70) <= 1, `image height ${size.height}`);
+      assert.ok((await session.page.callIsolated(() => scrollY, [])) > 0);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("M7c: ref screenshot of a wrapped inline link covers all its lines", async () => {
+    const session = await opened("/wrapped");
+    try {
+      await session.observe();
+      const target = session.lastObservation!.elements.find((item) => item.role === "link");
+      assert.ok(target);
+      const metrics = await session.page.callIsolated(() => {
+        const link = document.querySelector("a")!;
+        return {
+          lines: link.getClientRects().length,
+          lineHeight: Number.parseFloat(getComputedStyle(link).lineHeight),
+        };
+      }, []);
+      assert.ok(metrics.lines >= 3);
+      const result = await session.screenshot({ ref: target.ref });
+      assert.ok(result.ok, JSON.stringify(result));
+      assert.ok(jpegSize(result.capture.data).height >= metrics.lineHeight * 2.5);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("M7c: ref screenshot of an opacity:0 element reports not visible", async () => {
+    const session = await opened("/element");
+    try {
+      await session.observe();
+      const target = observed(session, "Clip target");
+      await session.page.callIsolated(() => {
+        document.getElementById("clip")!.style.opacity = "0";
+      }, []);
+      assert.deepEqual(await session.screenshot({ ref: target.ref }), {
+        ok: false,
+        reason: "not_visible",
+      });
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("M7c: ref screenshot of an aria-hidden but painted element succeeds", async () => {
+    const session = await opened("/element");
+    try {
+      await session.observe();
+      const target = observed(session, "Clip target");
+      await session.page.callIsolated(() => {
+        document.getElementById("clip")!.setAttribute("aria-hidden", "true");
+      }, []);
+      const result = await session.screenshot({ ref: target.ref });
+      assert.ok(result.ok, JSON.stringify(result));
+      const size = jpegSize(result.capture.data);
+      assert.ok(Math.abs(size.width - 200) <= 1);
+      assert.ok(Math.abs(size.height - 80) <= 1);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("M7c: locateRef maps an iframe element to page coordinates", async () => {
+    const session = await opened("/offset-frame");
+    try {
+      await session.observe();
+      const target = observed(session, "Offset target");
+      assert.match(target.ref, /^frame:/u);
+      const result = await locateRef(
+        session.page,
+        session.lastObservation!.epoch,
+        target.ref,
+        target.fingerprint,
+      );
+      assert.equal(result.status, "ok");
+      assert.ok(result.rect);
+      assert.ok(Math.abs(result.rect.x - 230) <= 1, `rect.x ${result.rect.x}`);
+      assert.ok(Math.abs(result.rect.y - 190) <= 1, `rect.y ${result.rect.y}`);
+    } finally {
       await session.close();
     }
   });

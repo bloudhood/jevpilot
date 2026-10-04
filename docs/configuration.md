@@ -132,7 +132,7 @@ claude mcp add --transport http jevpilot http://127.0.0.1:8940/mcp --header "Aut
 `jevpilot-mcp doctor` checks, with the same environment as the server: the Node version, every setting and its effective value, one real browser launch with its self-check, one minimal Jev call (latency and model; errors only by category) and the temp directory. `--no-browser` skips the launch and `--json` prints one JSON object. It exits with 1 when a check fails and never prints keys, tokens or secret values.
 
 ```sh
-npx -y --package https://github.com/bloudhood/jevpilot/releases/download/v0.3.0/jevpilot-0.3.0.tgz jevpilot-mcp doctor
+npx -y --package https://github.com/bloudhood/jevpilot/releases/download/v0.3.1/jevpilot-0.3.1.tgz jevpilot-mcp doctor
 ```
 
 ## Sessions

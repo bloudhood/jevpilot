@@ -5848,3 +5848,28 @@ test("M7b: handoff screenshots are skipped while a session holds unused secret r
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("M7c: a ref screenshot drops the cached observation so the next hover uses fresh coordinates", async () => {
+  let current = observation();
+  const instance = fixture({ observe: async () => current });
+  instance.page.callIsolated = async (fn) => {
+    if (fn.name === "resolveRefInPage")
+      return { status: "ok", rect: current.elements[0]!.rect } as never;
+    if (fn.name === "refOutsideViewport") return false as never;
+    return undefined as never;
+  };
+  try {
+    await instance.session.act([{ action: "click", ref: "e1" }]);
+    assert.equal(instance.seen.actions.length, 1);
+    assert.ok((await instance.session.screenshot({ ref: "e1" })).ok);
+    current = observation([
+      element("Next", "button", {
+        rect: { x: 300, y: 200, width: 80, height: 40 },
+      }),
+    ]);
+    await instance.session.act([{ action: "hover", ref: "e1" }]);
+    assert.deepEqual(instance.page.calls.find((call) => call.name === "hover")?.args, [340, 220]);
+  } finally {
+    await instance.session.close();
+  }
+});

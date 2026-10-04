@@ -111,6 +111,8 @@ export type RefResolution = {
   status: "ok" | "stale-epoch" | "missing" | "identity-changed";
   drift?: boolean;
   rect?: Rect;
+  bounds?: Rect;
+  painted?: boolean;
   clickPoint?: { x: number; y: number };
   visible?: boolean;
   enabled?: boolean;

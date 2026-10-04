@@ -169,7 +169,11 @@ export class ToolHost {
   };
 
   async handle(toolName: string, operation: () => Promise<object>): Promise<CallToolResult> {
-    return this.handleContent(toolName, async () => this.result(await operation()));
+    try {
+      return this.result(await operation());
+    } catch (error) {
+      return this.mapError(toolName, error, true);
+    }
   }
 
   async handleContent(
@@ -179,18 +183,24 @@ export class ToolHost {
     try {
       return await operation();
     } catch (error) {
-      if (error instanceof McpUserError) return this.failure(error.message);
-      if (error instanceof SessionCancelledError) return this.failure("Request cancelled.");
-      if (error instanceof BrowserDisconnectedError)
-        return this.result(disconnectedResult(error.session));
-      if (error instanceof EngineRegistryError)
-        return this.failure("Unknown browser profile. Use the configured default profile.");
-      const name = this.errorClass(error);
-      process.stderr.write(
-        `jevpilot-mcp tool=${toolName} error=${name} message=${JSON.stringify(this.sanitizedErrorMessage(error))} frame=${this.sourceFrame(error)}\n`,
-      );
-      return this.failure(`Tool failed (${name}). Check server configuration or retry.`);
+      return this.mapError(toolName, error, false);
     }
+  }
+
+  private mapError(toolName: string, error: unknown, structured: boolean): CallToolResult {
+    if (error instanceof McpUserError) return this.failure(error.message);
+    if (error instanceof SessionCancelledError) return this.failure("Request cancelled.");
+    if (error instanceof BrowserDisconnectedError)
+      return structured
+        ? this.result(disconnectedResult(error.session))
+        : this.failure(disconnectedResult(error.session).question);
+    if (error instanceof EngineRegistryError)
+      return this.failure("Unknown browser profile. Use the configured default profile.");
+    const name = this.errorClass(error);
+    process.stderr.write(
+      `jevpilot-mcp tool=${toolName} error=${name} message=${JSON.stringify(this.sanitizedErrorMessage(error))} frame=${this.sourceFrame(error)}\n`,
+    );
+    return this.failure(`Tool failed (${name}). Check server configuration or retry.`);
   }
 
   requireSession(id: string): OrchestratorSession {

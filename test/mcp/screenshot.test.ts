@@ -451,6 +451,147 @@ test("M7b: a page that hangs while locating a ref reports an unresponsive page",
   }
 });
 
+test("M7c: browser_screenshot of an element that is not painted reports it is not visible", async () => {
+  const deps = fakeMcpDeps();
+  deps.orchestrator!.observe = async () => ({
+    ...fakeMcpObservation(),
+    elements: [
+      {
+        ref: "e1",
+        framePath: "",
+        fingerprint: "target",
+        role: "button",
+        name: "Target",
+        tag: "button",
+        checked: false,
+        selected: false,
+        disabled: false,
+        readonly: false,
+        required: false,
+        invalid: false,
+        rect: { x: 0, y: 0, width: 100, height: 40 },
+        inViewport: true,
+        distanceBelowFold: 0,
+      },
+    ],
+  });
+  const running = await started(deps);
+  const page = running.deps.pages[0]!;
+  page.callIsolated = async (fn) =>
+    fn.name === "resolveRefInPage"
+      ? ({ status: "ok", rect: { x: 0, y: 0, width: 100, height: 40 }, painted: false } as never)
+      : (undefined as never);
+  try {
+    const result = await running.client.callTool({
+      name: "browser_screenshot",
+      arguments: { session: running.session, ref: "e1" },
+    });
+    assert.equal(result.isError, true);
+    assert.match(text(result), /not visible/u);
+    assert.equal(
+      page.calls.some((call) => call.name === "capture"),
+      false,
+    );
+  } finally {
+    await stopped(running);
+  }
+});
+
+test("M7c: a frame that times out while locating a ref reports an unresponsive page", async () => {
+  const deps = fakeMcpDeps();
+  deps.orchestrator!.observe = async () => ({
+    ...fakeMcpObservation(),
+    elements: [
+      {
+        ref: "frame:child@1/e1",
+        framePath: "child",
+        fingerprint: "target",
+        role: "button",
+        name: "Target",
+        tag: "button",
+        checked: false,
+        selected: false,
+        disabled: false,
+        readonly: false,
+        required: false,
+        invalid: false,
+        rect: { x: 0, y: 0, width: 100, height: 40 },
+        inViewport: true,
+        distanceBelowFold: 0,
+      },
+    ],
+  });
+  const running = await started(deps);
+  const page = running.deps.pages[0]!;
+  let lookups = 0;
+  page.frameHandles = [
+    {
+      id: "child",
+      offset: { x: 0, y: 0 },
+      callIsolated: async (fn) => {
+        if (fn.name === "resolveRefInPage") {
+          lookups++;
+          const error = new Error("timed out");
+          error.name = "CdpTimeoutError";
+          throw error;
+        }
+        return undefined as never;
+      },
+    },
+  ];
+  try {
+    const result = await running.client.callTool({
+      name: "browser_screenshot",
+      arguments: { session: running.session, ref: "frame:child@1/e1" },
+    });
+    assert.equal(result.isError, true);
+    assert.match(text(result), /did not respond/u);
+    assert.equal(lookups, 1);
+  } finally {
+    await stopped(running);
+  }
+});
+
+test("M7c: browser_screenshot after a browser disconnect returns an error without structuredContent", async () => {
+  const deps = fakeMcpDeps();
+  const driver = deps.engines.resolve().driver;
+  const launch = driver.launch.bind(driver);
+  let disconnect = () => {};
+  driver.launch = async (profile, options) => {
+    const browser = await launch(profile, options);
+    let connected = true;
+    return {
+      ...browser,
+      get connected() {
+        return connected;
+      },
+      onDisconnected: (listener) => {
+        disconnect = () => {
+          connected = false;
+          listener();
+        };
+        return () => {};
+      },
+    };
+  };
+  const running = await started(deps);
+  try {
+    disconnect();
+    const result = await running.client.callTool({
+      name: "browser_screenshot",
+      arguments: { session: running.session },
+    });
+    assert.equal(result.isError, true);
+    assert.equal(
+      text(result),
+      "The browser disconnected. Start a new browser_run; browser_close can release this session.",
+    );
+    assert.equal(result.structuredContent, undefined);
+  } finally {
+    await stopped(running);
+  }
+});
+
 test("M7b: browser_screenshot with a pending dialog asks to answer it first", async () => {
   const running = await started();
   const page = running.deps.pages[0]!;

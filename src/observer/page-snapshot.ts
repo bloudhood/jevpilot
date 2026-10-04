@@ -724,6 +724,7 @@ export async function locateRef(
           ? {
               ...result,
               rect: mapFrameRect(result.rect, frame.offset),
+              ...(result.bounds ? { bounds: mapFrameRect(result.bounds, frame.offset) } : {}),
             }
           : result;
       });
@@ -734,7 +735,34 @@ export async function locateRef(
   };
   const result = await resolve();
   if (result.status !== "ok" || !result.rect) return result;
-  if (ref.startsWith("frame:")) return result;
+  if (ref.startsWith("frame:")) {
+    const viewport = await page.callIsolated(
+      () => ({ width: innerWidth, height: innerHeight }),
+      [],
+    );
+    const box = result.bounds ?? result.rect;
+    if (
+      box.x >= 0 &&
+      box.y >= 0 &&
+      box.x + box.width <= viewport.width &&
+      box.y + box.height <= viewport.height
+    )
+      return result;
+    const separator = ref.indexOf("/");
+    const marker = ref.lastIndexOf("@", separator);
+    const frame = (await page.frames()).find((item) => item.id === ref.slice(6, marker));
+    if (!frame) return { status: "missing" };
+    try {
+      await frame.callIsolated(scrollRefIntoView, [
+        Number(ref.slice(marker + 1, separator)),
+        ref.slice(separator + 1),
+      ]);
+    } catch (error) {
+      if (error instanceof FrameGoneError) return { status: "missing" };
+      throw error;
+    }
+    return resolve();
+  }
   // Bring a partly off-screen element fully into the viewport, then resolve again: screenshots
   // clip to the viewport, unlike clicks.
   let offscreen: boolean;
@@ -1230,6 +1258,18 @@ export function resolveRefInPage(
     status: "ok",
     ...(drift ? { drift: true } : {}),
     rect: clickRect,
+    bounds: {
+      x: box.x + (location?.offsetX ?? 0),
+      y: box.y + (location?.offsetY ?? 0),
+      width: box.width,
+      height: box.height,
+    },
+    painted:
+      box.width > 0 &&
+      box.height > 0 &&
+      style.display !== "none" &&
+      style.visibility !== "hidden" &&
+      Number(style.opacity) !== 0,
     ...(point ? { clickPoint: point } : {}),
     visible:
       box.width > 0 &&

@@ -2683,6 +2683,7 @@ export class OrchestratorSession {
       return { ok: false, reason: "unsupported" };
     let clip: CaptureOptions["clip"] | undefined;
     if (options.ref !== undefined) {
+      delete this.queuedSample;
       const observation = this.lastObservation;
       const element = observation?.elements.find((item) => item.ref === options.ref);
       if (!observation || !element) return { ok: false, reason: "unknown_ref" };
@@ -2695,18 +2696,24 @@ export class OrchestratorSession {
           element.fingerprint,
         );
       } catch (error) {
-        if (error instanceof PageUnresponsiveError) return { ok: false, reason: "unresponsive" };
+        if (
+          error instanceof PageUnresponsiveError ||
+          (error instanceof Error && error.name === "CdpTimeoutError")
+        )
+          return { ok: false, reason: "unresponsive" };
         if (error instanceof Error && error.name === "DialogBlockingError")
           return { ok: false, reason: "dialog_open" };
         throw error;
       }
       if (resolution.status !== "ok" || !resolution.rect)
         return { ok: false, reason: "unknown_ref" };
+      if (resolution.painted === false) return { ok: false, reason: "not_visible" };
+      const bounds = resolution.bounds ?? resolution.rect;
       clip = {
-        x: resolution.rect.x,
-        y: resolution.rect.y,
-        width: resolution.rect.width,
-        height: resolution.rect.height,
+        x: bounds.x,
+        y: bounds.y,
+        width: bounds.width,
+        height: bounds.height,
       };
     }
     let capture: Capture;
