@@ -77,6 +77,27 @@ export type PageEvents = {
 };
 export type InputResult = { dialog?: PageEvents["dialog"] };
 
+export type CaptureOptions = {
+  quality?: number; // JPEG quality, default 70.
+  /** Region in CSS pixels relative to the top-level viewport; the whole viewport when absent. */
+  clip?: { x: number; y: number; width: number; height: number };
+  timeoutMs?: number; // Default 5000.
+};
+export type Capture = {
+  data: Uint8Array;
+  mimeType: "image/jpeg";
+  width: number; // CSS pixels.
+  height: number; // CSS pixels.
+};
+
+/** The capture region does not intersect the visual viewport. */
+export class EmptyCaptureError extends Error {
+  constructor() {
+    super("capture region is outside the viewport");
+    this.name = "EmptyCaptureError";
+  }
+}
+
 export interface FrameHandle {
   readonly id: string;
   readonly offset: { x: number; y: number; scaleX?: number; scaleY?: number };
@@ -115,6 +136,7 @@ export interface PageHandle {
     searchbox: boolean,
   ): Promise<boolean>;
   screenshot(options?: { quality?: number }): Promise<Uint8Array>;
+  capture?(options?: CaptureOptions): Promise<Capture>;
   frames(options?: {
     timeoutMs?: number;
     skipAdFrames?: boolean;

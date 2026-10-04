@@ -23,6 +23,7 @@ import {
   insertText,
   tapShift,
   keyPress,
+  captureScreenshot,
   screenshot,
   selectAll,
 } from "../../browser/input.ts";
@@ -34,6 +35,8 @@ import type { BrowserSession } from "../../browser/session.ts";
 import type {
   BrowserHandle,
   Capabilities,
+  Capture,
+  CaptureOptions,
   EngineDriver,
   FrameHandle,
   InputResult,
@@ -42,7 +45,12 @@ import type {
   PageHandle,
   StealthLevel,
 } from "../types.ts";
-import { FrameGoneError, NavigationInProgressError, PageUnresponsiveError } from "../types.ts";
+import {
+  EmptyCaptureError,
+  FrameGoneError,
+  NavigationInProgressError,
+  PageUnresponsiveError,
+} from "../types.ts";
 
 function isGoneChildFrameError(error: unknown): boolean {
   if (error instanceof NavigationInProgressError) return isGoneChildFrameError(error.cause);
@@ -1281,6 +1289,68 @@ class CdpPageHandle implements PageHandle {
   async screenshot(options: { quality?: number } = {}): Promise<Uint8Array> {
     this.ensureUnblocked();
     return screenshot(this.browser.client, this.session.sessionId, options.quality);
+  }
+  async capture(captureOptions: CaptureOptions = {}): Promise<Capture> {
+    return this.whileUnblocked(async () => {
+      const timeoutMs = captureOptions.timeoutMs ?? 5000;
+      let metrics;
+      try {
+        metrics = await this.browser.client.call(
+          "Page.getLayoutMetrics",
+          undefined,
+          this.session.sessionId,
+          timeoutMs,
+        );
+      } catch (error) {
+        throw this.pageCallError(error);
+      }
+      const css = metrics.cssVisualViewport;
+      const dpr =
+        metrics.visualViewport.clientWidth > 0 && css.clientWidth > 0
+          ? metrics.visualViewport.clientWidth / css.clientWidth
+          : 1;
+      const scale = Number.isFinite(dpr) && dpr > 0 ? 1 / dpr : 1;
+      let region: { x: number; y: number; width: number; height: number };
+      if (captureOptions.clip) {
+        const left = Math.max(captureOptions.clip.x, 0);
+        const top = Math.max(captureOptions.clip.y, 0);
+        const right = Math.min(captureOptions.clip.x + captureOptions.clip.width, css.clientWidth);
+        const bottom = Math.min(
+          captureOptions.clip.y + captureOptions.clip.height,
+          css.clientHeight,
+        );
+        const width = right - left;
+        const height = bottom - top;
+        if (width <= 0 || height <= 0) throw new EmptyCaptureError();
+        region = { x: left, y: top, width, height };
+      } else {
+        if (css.clientWidth <= 0 || css.clientHeight <= 0) throw new EmptyCaptureError();
+        region = { x: 0, y: 0, width: css.clientWidth, height: css.clientHeight };
+      }
+      let data: Uint8Array;
+      try {
+        data = await captureScreenshot(this.browser.client, this.session.sessionId, {
+          ...(captureOptions.quality !== undefined ? { quality: captureOptions.quality } : {}),
+          clip: {
+            x: css.pageX + region.x,
+            y: css.pageY + region.y,
+            width: region.width,
+            height: region.height,
+            scale,
+          },
+          timeoutMs,
+        });
+      } catch (error) {
+        if (error instanceof EmptyCaptureError) throw error;
+        throw this.pageCallError(error);
+      }
+      return {
+        data,
+        mimeType: "image/jpeg",
+        width: Math.round(region.width),
+        height: Math.round(region.height),
+      };
+    });
   }
   on<K extends keyof PageEvents>(event: K, handler: (value: PageEvents[K]) => void): void {
     const handlers = this.listeners.get(event) ?? new Set<(value: never) => void>();

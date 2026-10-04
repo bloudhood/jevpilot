@@ -65,6 +65,14 @@ Page loads (top-level documents, iframes, redirects, popups and downloads) are c
 
 If a host remains unverified because the lookup times out or returns a resolver error other than `ENOTFOUND`/`ENODATA`, `private` mode refuses the document request, popup or download when the browser resolves names itself (no configured proxy). The default `metadata` mode and `off` with extra blocked ranges allow it and rely on the connected-IP check where it applies. Missing names are left to the browser in every mode.
 
+## Tools and screenshots
+
+| Variable                   | Meaning                                                                                                                                                                                                                                                                                                                                |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `JEVPILOT_IMAGE_RESPONSES` | `allow` (default) or `omit`. `omit` makes `browser_screenshot` behave like `output: "file"`: it saves the image and returns only the path, and its text says images are disabled by the server. Any other value is refused at startup.                                                                                                 |
+| `JEVPILOT_SCREENSHOT_DIR`  | Absolute path of an existing directory for `browser_screenshot` files. Files written there are named `jevpilot-<yyyyMMdd-HHmmss>-<id>.jpg` and jevpilot never deletes them; without it, screenshots go to the session's temporary directory and are removed when the session closes. A relative or missing path is refused at startup. |
+| `JEVPILOT_DISABLED_TOOLS`  | Comma-separated tool names to leave unregistered; whitespace and empty items are ignored. `browser_run` and `browser_close` cannot be disabled, and an unknown name is refused at startup.                                                                                                                                             |
+
 ## HTTP transport
 
 stdio is the default. `JEVPILOT_TRANSPORT=http` serves Streamable HTTP at `/mcp`.
@@ -124,7 +132,7 @@ claude mcp add --transport http jevpilot http://127.0.0.1:8940/mcp --header "Aut
 `jevpilot-mcp doctor` checks, with the same environment as the server: the Node version, every setting and its effective value, one real browser launch with its self-check, one minimal Jev call (latency and model; errors only by category) and the temp directory. `--no-browser` skips the launch and `--json` prints one JSON object. It exits with 1 when a check fails and never prints keys, tokens or secret values.
 
 ```sh
-npx -y --package https://github.com/bloudhood/jevpilot/releases/download/v0.2.2/jevpilot-0.2.2.tgz jevpilot-mcp doctor
+npx -y --package https://github.com/bloudhood/jevpilot/releases/download/v0.3.0/jevpilot-0.3.0.tgz jevpilot-mcp doctor
 ```
 
 ## Sessions

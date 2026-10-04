@@ -60,7 +60,7 @@ Claude Code（`.mcp.json`）：
       "args": [
         "-y",
         "--package",
-        "https://github.com/bloudhood/jevpilot/releases/download/v0.2.2/jevpilot-0.2.2.tgz",
+        "https://github.com/bloudhood/jevpilot/releases/download/v0.3.0/jevpilot-0.3.0.tgz",
         "jevpilot-mcp"
       ],
       "env": { "JEV_PROVIDER": "openrouter", "JEV_API_KEY": "${JEV_API_KEY}" }
@@ -74,7 +74,7 @@ Codex（`config.toml`）：
 ```toml
 [mcp_servers.jevpilot]
 command = "npx"
-args = ["-y", "--package", "https://github.com/bloudhood/jevpilot/releases/download/v0.2.2/jevpilot-0.2.2.tgz", "jevpilot-mcp"]
+args = ["-y", "--package", "https://github.com/bloudhood/jevpilot/releases/download/v0.3.0/jevpilot-0.3.0.tgz", "jevpilot-mcp"]
 env = { JEV_PROVIDER = "openrouter" }
 env_vars = ["JEV_API_KEY"]
 ```
@@ -83,7 +83,7 @@ env_vars = ["JEV_API_KEY"]
 
 ## 工具
 
-`browser_run` 按目标开始一个会话；`browser_resume` 在补充值、批准操作或更新目标后继续。`browser_observe`、`browser_act`、`browser_navigate`、`browser_tabs` 和 `browser_close` 供 agent 需要时手动操作，`jev_decide` 直接调用 Jev。
+`browser_run` 按目标开始一个会话；`browser_resume` 在补充值、批准操作或更新目标后继续。`browser_observe`、`browser_act`、`browser_navigate`、`browser_tabs` 和 `browser_close` 供 agent 需要时手动操作，`browser_screenshot` 把页面（或单个元素）作为图片交给 agent，或保存成文件交给用户，`jev_decide` 直接调用 Jev。
 
 ## 文档（英文）
 

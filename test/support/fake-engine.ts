@@ -100,6 +100,21 @@ export class FakePageHandle implements PageHandle {
   async screenshot(): Promise<Uint8Array> {
     return new Uint8Array();
   }
+  captureResult: { data: Uint8Array; width: number; height: number } | Error | undefined;
+  async capture(options?: {
+    quality?: number;
+    clip?: { x: number; y: number; width: number; height: number };
+    timeoutMs?: number;
+  }): Promise<{ data: Uint8Array; mimeType: "image/jpeg"; width: number; height: number }> {
+    this.calls.push({ name: "capture", args: [options] });
+    if (this.captureResult instanceof Error) throw this.captureResult;
+    const result = this.captureResult ?? {
+      data: new Uint8Array([0xff, 0xd8, 0xff, 0xe0]),
+      width: 800,
+      height: 600,
+    };
+    return { ...result, mimeType: "image/jpeg" as const };
+  }
   async frames(_options?: { timeoutMs?: number }): Promise<FrameHandle[]> {
     return this.frameHandles;
   }

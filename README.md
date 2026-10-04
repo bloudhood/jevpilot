@@ -60,7 +60,7 @@ Claude Code (`.mcp.json`):
       "args": [
         "-y",
         "--package",
-        "https://github.com/bloudhood/jevpilot/releases/download/v0.2.2/jevpilot-0.2.2.tgz",
+        "https://github.com/bloudhood/jevpilot/releases/download/v0.3.0/jevpilot-0.3.0.tgz",
         "jevpilot-mcp"
       ],
       "env": { "JEV_PROVIDER": "openrouter", "JEV_API_KEY": "${JEV_API_KEY}" }
@@ -74,7 +74,7 @@ Codex (`config.toml`):
 ```toml
 [mcp_servers.jevpilot]
 command = "npx"
-args = ["-y", "--package", "https://github.com/bloudhood/jevpilot/releases/download/v0.2.2/jevpilot-0.2.2.tgz", "jevpilot-mcp"]
+args = ["-y", "--package", "https://github.com/bloudhood/jevpilot/releases/download/v0.3.0/jevpilot-0.3.0.tgz", "jevpilot-mcp"]
 env = { JEV_PROVIDER = "openrouter" }
 env_vars = ["JEV_API_KEY"]
 ```
@@ -83,7 +83,7 @@ Use `JEV_PROVIDER=typesafe` for a TypeSafe key. On native Windows, Claude Code n
 
 ## Tools
 
-`browser_run` starts a session toward a goal; `browser_resume` continues it with values, an approval or a new goal. `browser_observe`, `browser_act`, `browser_navigate`, `browser_tabs` and `browser_close` give the agent manual control when it wants it, and `jev_decide` calls Jev directly.
+`browser_run` starts a session toward a goal; `browser_resume` continues it with values, an approval or a new goal. `browser_observe`, `browser_act`, `browser_navigate`, `browser_tabs` and `browser_close` give the agent manual control when it wants it, `browser_screenshot` shows it the page (or one element) as an image or saves it for the user, and `jev_decide` calls Jev directly.
 
 ## Documentation
 

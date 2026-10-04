@@ -395,3 +395,24 @@ export async function screenshot(
   );
   return Uint8Array.from(Buffer.from(result.data, "base64"));
 }
+export async function captureScreenshot(
+  client: CdpClient,
+  sessionId: string,
+  options: {
+    quality?: number;
+    clip?: { x: number; y: number; width: number; height: number; scale: number };
+    timeoutMs?: number;
+  } = {},
+): Promise<Uint8Array> {
+  const result = await client.call(
+    "Page.captureScreenshot",
+    {
+      format: "jpeg",
+      quality: options.quality ?? 70,
+      ...(options.clip ? { clip: options.clip } : {}),
+    },
+    sessionId,
+    options.timeoutMs,
+  );
+  return Uint8Array.from(Buffer.from(result.data, "base64"));
+}
