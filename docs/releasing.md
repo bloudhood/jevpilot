@@ -23,7 +23,7 @@ This checklist prepares a GitHub Release (vX.Y.Z). The release assets are the np
    node scripts/pack-smoke.mjs
    ```
 
-   It builds and packs the package, checks that it contains only package.json, the READMEs, LICENSE and dist/, installs it into a temporary project, and starts the MCP server both from the installed CLI and with the README's `npx --package` command. It works offline from `.npm-cache`.
+   It builds and packs the package, checks that it contains only package.json, the READMEs, LICENSE and dist/, installs it into a temporary project, and starts the MCP server both from the installed CLI and with the README's `npx --package` command. It installs and runs from `.npm-cache` without network access and fails if a required dependency is missing from that cache.
 
 5. Create the release tarball:
 

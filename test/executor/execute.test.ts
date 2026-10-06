@@ -93,6 +93,20 @@ test("O9e: typing ends with a key press that carries the full value", async () =
   );
 });
 
+test("post-action observation is bounded by the deadline", async () => {
+  const page = new FakePageHandle(undefined, observation);
+  const quietTimeouts: Array<number | undefined> = [];
+  const call = page.callIsolated.bind(page);
+  page.callIsolated = async (fn, args, options) => {
+    if (fn.name === "waitForNavigationQuiet") quietTimeouts.push(options?.timeoutMs);
+    return call(fn, args, options);
+  };
+  await executeAction(page, observation, { kind: "wait" }, {}, { observeMaxWaitMs: 600 });
+  // The real observer receives the budget and uses it unchanged for its quiet-wait CDP call.
+  assert.equal(quietTimeouts.at(-1), 600);
+  assert.ok(page.calls.some((call) => call.name === "pageSnapshot"));
+});
+
 test("stale ref short circuits all input", async () => {
   const page = new FakePageHandle({ status: "identity-changed" });
   const result = await executeAction(page, observation, { kind: "click", target });

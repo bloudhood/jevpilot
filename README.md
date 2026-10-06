@@ -60,7 +60,7 @@ Claude Code (`.mcp.json`):
       "args": [
         "-y",
         "--package",
-        "jevpilot@0.4.0",
+        "jevpilot@0.4.1",
         "jevpilot-mcp"
       ],
       "env": { "JEV_PROVIDER": "openrouter", "JEV_API_KEY": "${JEV_API_KEY}" }
@@ -74,14 +74,14 @@ Codex (`config.toml`):
 ```toml
 [mcp_servers.jevpilot]
 command = "npx"
-args = ["-y", "--package", "jevpilot@0.4.0", "jevpilot-mcp"]
+args = ["-y", "--package", "jevpilot@0.4.1", "jevpilot-mcp"]
 env = { JEV_PROVIDER = "openrouter" }
 env_vars = ["JEV_API_KEY"]
 ```
 
 Use `JEV_PROVIDER=typesafe` for a TypeSafe key. On native Windows, Claude Code needs `"command": "cmd"` with `"args": ["/c", "npx", ...]`. Check the setup with `jevpilot-mcp doctor` (the same `npx` command with `doctor` at the end).
 
-The same package is attached to each [GitHub release](https://github.com/bloudhood/jevpilot/releases) as `jevpilot-X.Y.Z.tgz` with `SHA256SUMS.txt`; to install from it, replace `jevpilot@0.4.0` with `https://github.com/bloudhood/jevpilot/releases/download/v0.4.0/jevpilot-0.4.0.tgz`.
+The same package is attached to each [GitHub release](https://github.com/bloudhood/jevpilot/releases) as `jevpilot-X.Y.Z.tgz` with `SHA256SUMS.txt`; to install from it, replace `jevpilot@0.4.1` with `https://github.com/bloudhood/jevpilot/releases/download/v0.4.1/jevpilot-0.4.1.tgz`.
 
 ## Tools
 

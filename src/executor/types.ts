@@ -1,6 +1,14 @@
 import type { PageEvents } from "../engine/types.ts";
 
 export type Target = { epoch: number; ref: string; fingerprint: string };
+export type ExecuteOptions = {
+  navigationTimeoutMs?: number;
+  actionabilityTimeoutMs?: number;
+  waitTimeoutMs?: number;
+  popupWaitMs?: number;
+  strictIdentity?: boolean;
+  observeMaxWaitMs?: number;
+};
 export type Action =
   | { kind: "click"; target: Target }
   | { kind: "type"; target: Target; valueKey?: string; text?: string; submit?: boolean }

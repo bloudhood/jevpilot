@@ -108,6 +108,315 @@ const decision: DecisionResult = {
   attempts: 1,
 };
 
+test("observation timeout at the deadline yields instead of reporting an unresponsive page", async () => {
+  for (const route of ["run", "pending", "dialog"] as const) {
+    const clock = { now: 0 };
+    let timeout = route !== "dialog";
+    let opens = 0;
+    let probes = 0;
+    const instance = fixture({
+      clock,
+      observe: async () => {
+        if (timeout) {
+          clock.now = 10;
+          throw new PageUnresponsiveError();
+        }
+        return observation();
+      },
+      options: {
+        openIsolatedPage: async () => {
+          opens++;
+          return new FakePageHandle();
+        },
+      },
+    });
+    instance.page.callIsolated = async () => {
+      probes++;
+      return true as never;
+    };
+    if (route === "dialog") {
+      instance.page.emit("dialog", { kind: "confirm", message: "Confirm?", defaultPrompt: "" });
+      instance.page.handleDialog = async () => {
+        clock.now = 10;
+        throw new PageUnresponsiveError();
+      };
+    }
+    if (route === "pending")
+      instance.session.pendingGatedAction = {
+        action: action(),
+        url: observation().url,
+        epoch: 1,
+        ref: "e1",
+        fingerprint: "same",
+        role: "button",
+        name: "Next",
+        reason: "irreversible",
+      };
+    try {
+      const result =
+        route === "dialog"
+          ? await instance.session.resume({ dialog: { accept: true } }, { deadlineAt: 10 })
+          : route === "pending"
+            ? await instance.session.resume({ allow_irreversible: true }, { deadlineAt: 10 })
+            : await instance.session.run({ deadlineAt: 10 });
+      assert.equal(result.reason, "call_deadline_exceeded");
+      assert.equal(result.status, "BUDGET_EXHAUSTED");
+      assert.equal(opens, 0);
+      timeout = false;
+      await instance.session.resume();
+      assert.equal(probes, 0, "deadline timeout must not mark the page unresponsive");
+    } finally {
+      await instance.session.close();
+    }
+  }
+});
+
+test("deadline-cut initial navigation does not block completion", async () => {
+  const instance = fixture({
+    options: {
+      navigation: { url: observation().url, headers: {}, failure: "call_deadline_exceeded" },
+    },
+    detect,
+    outcomes: [{ type: "done_candidate", goalMet: 1 }],
+  });
+  try {
+    assert.equal((await instance.session.run({ deadlineAt: 10 })).reason, "call_deadline_exceeded");
+    const result = await instance.session.resume();
+    assert.equal(result.status, "DONE_UNVERIFIED");
+    assert.doesNotMatch(result.question, /error page/u);
+  } finally {
+    await instance.session.close();
+  }
+});
+
+test("action finished after the deadline is recorded before yielding", async () => {
+  for (const success of [false, true]) {
+    const clock = { now: 0 };
+    const field = element("Name", "textbox", { tag: "input", inputType: "text" });
+    let finished = false;
+    const instance = fixture({
+      clock,
+      options: {
+        values: { name: "Ada" },
+        usageDetail: true,
+        ...(success ? { success: { text_present: "Finished" } } : {}),
+      },
+      observe: async () => observation([field], finished ? "done" : "start"),
+      pageMatches: async () => finished,
+      outcomes: [
+        {
+          type: "act",
+          action: {
+            kind: "type",
+            target: { epoch: 1, ref: field.ref, fingerprint: field.fingerprint },
+            valueKey: "name",
+          },
+        },
+      ],
+      executeAction: async () => {
+        finished = true;
+        clock.now = 11;
+        return {
+          ...changed(),
+          changes: { url: false, pageHash: true, value: true, checked: false },
+          timings: { precheckMs: 0, inputMs: 2, settleMs: 3, waitMs: 5, harnessMs: 1 },
+        };
+      },
+    });
+    try {
+      const result = await instance.session.run({ deadlineAt: 10 });
+      assert.equal(result.status, success ? "DONE_VERIFIED" : "BUDGET_EXHAUSTED");
+      if (!success) assert.equal(result.reason, "call_deadline_exceeded");
+      assert.equal(result.trace.length, 1);
+      assert.equal(result.trace[0]?.op, "type");
+      assert.equal(result.trace[0]?.waitMs, 5);
+      assert.equal(result.trace[0]?.step, 1);
+      assert.equal(result.timing.browser, 10);
+      assert.ok(result.timing.harness >= 1);
+      assert.ok(
+        (instance.session as unknown as { consumedKeys: Set<string> }).consumedKeys.has("name"),
+      );
+      assert.equal(instance.seen.actions.length, 1);
+    } finally {
+      await instance.session.close();
+    }
+  }
+});
+
+test("post-action observation is bounded by the deadline", async () => {
+  for (const bounded of [false, true]) {
+    const clock = { now: 0 };
+    let observeMaxWaitMs: number | undefined;
+    const instance = fixture({
+      clock,
+      decide: async () => {
+        clock.now = 7;
+        return decision;
+      },
+      outcomes: [
+        { type: "act", action: action() },
+        { type: "done_candidate", goalMet: 1 },
+      ],
+      executeAction: async (_page, _before, _action, _values, options) => {
+        observeMaxWaitMs = options?.observeMaxWaitMs;
+        clock.now = 20;
+        return changed();
+      },
+    });
+    try {
+      await instance.session.run(bounded ? { deadlineAt: 20 } : {});
+      assert.equal(instance.seen.actions.length, 1);
+      assert.equal(observeMaxWaitMs, bounded ? 13 : undefined);
+    } finally {
+      await instance.session.close();
+    }
+  }
+});
+
+// Bounded: without the deadline checks this wait loops on the fake clock instead of failing.
+test("challenge wait stops at the deadline", { timeout: 10_000 }, async () => {
+  const clock = { now: 0 };
+  const instance = fixture({
+    clock,
+    findings: [
+      [
+        {
+          kind: "challenge",
+          level: "blocking",
+          evidence: [],
+          vendor: "Example",
+          autoPassPlausible: true,
+        },
+      ],
+    ],
+    options: { autoPassWindowMs: 8000 },
+  });
+  try {
+    const result = await instance.session.run({ deadlineAt: 250 });
+    assert.equal(result.reason, "call_deadline_exceeded");
+    assert.equal(clock.now, 250);
+    assert.equal(instance.seen.actions.length, 0);
+  } finally {
+    await instance.session.close();
+  }
+});
+
+test("empty page wait stops at the deadline", { timeout: 10_000 }, async () => {
+  const clock = { now: 0 };
+  const instance = fixture({ clock, observations: [{ ...observation([]), text: "" }] });
+  try {
+    const result = await instance.session.run({ deadlineAt: 750 });
+    assert.equal(result.reason, "call_deadline_exceeded");
+    assert.equal(clock.now, 750);
+    assert.equal(instance.seen.actions.length, 0);
+  } finally {
+    await instance.session.close();
+  }
+});
+
+test("field repair does not type after the deadline", async () => {
+  for (const expires of [false, true]) {
+    const clock = { now: 0 };
+    let repairOptions: Parameters<SessionDeps["executeAction"]>[4];
+    const field = element("Name", "textbox", { tag: "input", inputType: "text" });
+    const target = { epoch: 1, ref: field.ref, fingerprint: field.fingerprint };
+    const instance = fixture({
+      clock,
+      observations: [observation([field])],
+      outcomes: [
+        { type: "act", action: { kind: "type", target, text: "Ada" } },
+        { type: "act", action: { kind: "submit", target } },
+        { type: "done_candidate", goalMet: 1 },
+      ],
+      executeAction: async (_p, _o, chosen, _v, options) => {
+        if (instance.seen.actions.length === 2 && chosen.kind === "type") {
+          repairOptions = options;
+        }
+        return {
+          ...changed(),
+          changes: { url: false, pageHash: true, value: chosen.kind === "type", checked: false },
+        };
+      },
+    });
+    let checks = 0;
+    instance.page.callIsolated = async (fn) => {
+      if (fn.name === "checkTypedFieldsInPage") {
+        if (++checks === 1) {
+          clock.now = expires ? 10 : 5;
+          return ["changed"] as never;
+        }
+        return ["ok"] as never;
+      }
+      return [] as never;
+    };
+    try {
+      const result = await instance.session.run({ deadlineAt: 10 });
+      if (expires) {
+        assert.equal(result.reason, "call_deadline_exceeded");
+        assert.deepEqual(
+          instance.seen.actions.map((item) => item.kind),
+          ["type"],
+        );
+      } else {
+        assert.deepEqual(
+          instance.seen.actions.map((item) => item.kind),
+          ["type", "type", "submit"],
+        );
+        assert.equal(repairOptions?.navigationTimeoutMs, 5);
+        assert.equal(repairOptions?.actionabilityTimeoutMs, 5);
+        assert.equal(repairOptions?.observeMaxWaitMs, 5);
+      }
+    } finally {
+      await instance.session.close();
+    }
+  }
+});
+
+test("batch stops at the deadline after its last budgeted step", async () => {
+  const clock = { now: 0 };
+  const first = element("First", "textbox", {
+    tag: "input",
+    inputType: "text",
+    ref: "first",
+    fingerprint: "first",
+  });
+  const second = element("Second", "textbox", {
+    tag: "input",
+    inputType: "text",
+    ref: "second",
+    fingerprint: "second",
+  });
+  const instance = fixture({
+    clock,
+    options: { budget: { steps: 1 }, values: { first: "Ada", second: "Grace" } },
+    observations: [observation([first, second])],
+    outcomes: [
+      {
+        type: "batch",
+        actions: [first, second].map((item) => ({
+          kind: "type",
+          target: { epoch: 1, ref: item.ref, fingerprint: item.fingerprint },
+          valueKey: item.ref,
+        })),
+      },
+    ],
+    executeAction: async () => {
+      clock.now = 11;
+      return { ...changed(), changes: { url: false, pageHash: true, value: true, checked: false } };
+    },
+  });
+  try {
+    const result = await instance.session.run({ deadlineAt: 10 });
+    assert.equal(result.reason, "call_deadline_exceeded");
+    assert.equal(instance.seen.actions.length, 1);
+    const consumed = (instance.session as unknown as { consumedKeys: Set<string> }).consumedKeys;
+    assert.ok(consumed.has("first"));
+    assert.equal(consumed.has("second"), false);
+  } finally {
+    await instance.session.close();
+  }
+});
+
 test("seconds reset but tokens remain cumulative", async () => {
   const clock = { now: 0 };
   const instance = fixture({
@@ -1222,6 +1531,8 @@ function fixture(
     ...(overrides.tempDir ? { tempDir: overrides.tempDir } : {}),
     sleep: async (ms) => {
       clock.now += ms;
+      // Yield to timers, so a wait loop that never ends fails by test timeout instead of starving it.
+      await new Promise((resolve) => setImmediate(resolve));
     },
   };
   const session = new OrchestratorSession({ page, goal: "finish", ...overrides.options }, deps);
@@ -4062,6 +4373,202 @@ test("same-action retry preserves identity scope", async () => {
     } finally {
       await instance.session.close();
     }
+  }
+});
+
+test("pending approval does not move to another row", async () => {
+  const alice = element("Delete", "button", {
+    ref: "alice",
+    fingerprint: "alice",
+    containerText: "Alice",
+  });
+  const bob = { ...alice, ref: "bob", fingerprint: "bob", containerText: "Bob" };
+  const instance = fixture({ observations: [observation([bob])] });
+  instance.session.pendingGatedAction = {
+    action: action(alice),
+    url: "http://example.test/start",
+    epoch: 1,
+    ref: "alice",
+    fingerprint: "alice",
+    role: "button",
+    name: "Delete",
+    containerText: "Alice",
+    reason: "irreversible:delete",
+  };
+  try {
+    const result = await instance.session.resume({ allow_irreversible: true });
+    assert.equal(result.status, "UNCERTAIN");
+    assert.match(result.question, /stored target changed/u);
+    assert.equal(instance.seen.actions.length, 0);
+  } finally {
+    await instance.session.close();
+  }
+});
+
+test("pending approval still finds its row when it is the only match", async () => {
+  const alice = element("Delete", "button", {
+    ref: "alice",
+    fingerprint: "alice",
+    containerText: "Alice",
+  });
+  const instance = fixture({ observations: [observation([alice]), observation([alice])] });
+  instance.session.pendingGatedAction = {
+    action: action(alice),
+    url: "http://example.test/start",
+    epoch: 1,
+    ref: "alice",
+    fingerprint: "alice",
+    role: "button",
+    name: "Delete",
+    containerText: "Alice",
+    reason: "irreversible:delete",
+  };
+  try {
+    await instance.session.resume({ allow_irreversible: true });
+    assert.equal(instance.seen.actions.length, 1);
+  } finally {
+    await instance.session.close();
+  }
+});
+
+test("a new goal drops the pending action", async () => {
+  // Not an irreversible control, so the old action would really be dispatched without the fix.
+  const item = element("Open report", "link", {
+    ref: "report",
+    fingerprint: "report",
+    href: "https://outside.test/report",
+  });
+  const instance = fixture({ observations: [observation([item])] });
+  instance.session.pendingGatedAction = {
+    action: action(item),
+    url: "http://example.test/start",
+    epoch: 1,
+    ref: "report",
+    fingerprint: "report",
+    role: "link",
+    name: "Open report",
+    reason: "domain:outside.test",
+  };
+  try {
+    await instance.session.resume({ goal_update: "new goal", allowed_domains: ["outside.test"] });
+    assert.equal(instance.seen.actions.length, 0);
+  } finally {
+    await instance.session.close();
+  }
+});
+
+test("resume keeps a gate raised by the pending action", async () => {
+  const link = element("Delete", "link", {
+    ref: "go",
+    fingerprint: "go",
+    href: "https://outside.test/next",
+  });
+  const instance = fixture({ observations: [observation([link]), observation([link])] });
+  instance.session.pendingGatedAction = {
+    action: action(link),
+    url: "http://example.test/start",
+    epoch: 1,
+    ref: "go",
+    fingerprint: "go",
+    role: "link",
+    name: "Delete",
+    reason: "domain:outside.test",
+  };
+  try {
+    const first = await instance.session.resume({ allowed_domains: ["outside.test"] });
+    assert.equal(first.status, "CONFIRM_REQUIRED");
+    assert.ok(instance.session.pendingGatedAction);
+  } finally {
+    await instance.session.close();
+  }
+});
+
+test("approved retry does not carry approval to another URL", async () => {
+  const buy = element("Delete", "button", { ref: "buy", fingerprint: "buy" });
+  const moved = { ...buy, ref: "moved", fingerprint: "moved" };
+  let calls = 0;
+  const instance = fixture({
+    observations: [observation([buy]), observation([moved], "next", "http://example.test/other")],
+    executeAction: async () => {
+      calls++;
+      return calls === 1 ? { ...changed(), outcome: "stale" } : changed();
+    },
+  });
+  try {
+    const result = await instance.session.act([{ action: "click", ref: buy.ref }], {
+      allow_irreversible: true,
+    });
+    assert.equal(calls, 1);
+    assert.equal(result.status, "CONFIRM_REQUIRED");
+  } finally {
+    await instance.session.close();
+  }
+});
+
+test("approved retry does not carry approval to a popup", async () => {
+  const buy = element("Delete", "button", { ref: "buy", fingerprint: "buy" });
+  const onPopup = { ...buy, ref: "popup-delete", fingerprint: "popup-delete" };
+  const popup = new FakePageHandle();
+  let calls = 0;
+  const instance = fixture({
+    observations: [
+      observation([buy]),
+      observation([onPopup], "popup", "http://example.test/start"),
+    ],
+    executeAction: async () => {
+      calls++;
+      // The approved click does not land; meanwhile the page opens a popup with a same-named control.
+      instance.page.emit("popup", popup);
+      return { ...changed(), outcome: "stale" };
+    },
+  });
+  try {
+    const result = await instance.session.act([{ action: "click", ref: buy.ref }], {
+      allow_irreversible: true,
+    });
+    assert.equal(instance.session.page, popup);
+    assert.equal(calls, 1);
+    assert.equal(result.status, "CONFIRM_REQUIRED");
+    assert.equal(instance.session.pendingGatedAction?.ref, onPopup.ref);
+  } finally {
+    await instance.session.close();
+  }
+});
+
+test("pending approval does not move to another row by position", async () => {
+  const alice = element("Delete", "button", {
+    ref: "alice",
+    fingerprint: "alice",
+    containerText: "Alice",
+    itemPosition: 2,
+  });
+  const rows = ["Bob", "Carol", "Dave"].map((name, index) => ({
+    ...alice,
+    ref: name,
+    fingerprint: name,
+    containerText: name,
+    itemPosition: index + 1,
+  }));
+  const instance = fixture({ observations: [observation(rows)] });
+  instance.session.pendingGatedAction = {
+    action: action(alice),
+    url: "http://example.test/start",
+    epoch: 1,
+    ref: "alice",
+    fingerprint: "alice",
+    role: "button",
+    name: "Delete",
+    containerText: "Alice",
+    itemPosition: 2,
+    reason: "irreversible:delete",
+  };
+  try {
+    const result = await instance.session.resume({ allow_irreversible: true });
+    assert.equal(result.status, "UNCERTAIN");
+    assert.match(result.question, /stored target changed/u);
+    assert.equal(instance.seen.actions.length, 0);
+  } finally {
+    await instance.session.close();
   }
 });
 

@@ -14,10 +14,14 @@ import {
   parseActionabilityTimeout,
   parseCallDeadline,
   parseNavigationTimeout,
+  parseImageResponses,
+  parseScreenshotDir,
+  parseDisabledTools,
 } from "./profile.ts";
 import { parseHttpConfig } from "./http.ts";
 import { parseMaxSessions, parseNetworkGuard } from "./network-guard.ts";
 import { parseThresholds } from "./thresholds.ts";
+import { validateDisabledTools } from "./server.ts";
 
 export type DoctorStatus = "ok" | "warn" | "fail";
 export type DoctorCheck = { name: string; status: DoctorStatus; detail: string };
@@ -114,6 +118,10 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorResu
     const thresholds = parseThresholds(env.JEVPILOT_THRESHOLDS);
     const network = parseNetworkGuard(env.JEVPILOT_NETWORK_GUARD, env.JEVPILOT_BLOCKED_ADDRESSES);
     const maxSessions = parseMaxSessions(env.JEVPILOT_MAX_SESSIONS);
+    parseImageResponses(env.JEVPILOT_IMAGE_RESPONSES);
+    parseScreenshotDir(env.JEVPILOT_SCREENSHOT_DIR);
+    const disabledTools = parseDisabledTools(env.JEVPILOT_DISABLED_TOOLS);
+    validateDisabledTools(disabledTools);
     loaded = await loadMcpProfile(env);
     if (env.JEV_PROVIDER)
       parsedDecision = (options.decisionConfigLoader ?? loadDecisionConfig)(env);

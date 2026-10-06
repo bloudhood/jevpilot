@@ -2,6 +2,19 @@
 
 This project follows Keep a Changelog. Versions use Semantic Versioning.
 
+## [0.4.1] - 2026-10-06
+
+Fixes from a review of 0.4.0: an approval applies only to its own target, an action whose outcome is unknown is not repeated, and the per-call deadline and downloads behave as documented. No configuration changes.
+
+### Fixed
+
+- An approval covers only its own target: a retried irreversible action keeps the approval only on the same page and URL, and a pending approval is used only for a control in the same row. Otherwise the agent is asked again.
+- `browser_resume` keeps a confirmation raised by the pending action it runs, and a goal update drops the pending action chosen for the old goal.
+- When the page stops responding while an action is being performed, the result is UNCERTAIN ("may or may not have taken effect") instead of reopening the page and continuing, which could repeat the action.
+- Per-call deadline: a timeout near the deadline returns `call_deadline_exceeded` instead of "page is not responding"; the observation after an action, empty-page and challenge waits, field repair and the rest of a batch stop at the deadline; an action that finished after the deadline is recorded before the call yields; a first navigation cut by the deadline no longer prevents completion.
+- Downloads: a secret in a suggested file name is redacted before the name is shortened; downloads keep completing after the session switches tabs; a finished file is moved without replacing another file (also where hard links are unavailable) and checked after the move; a verified download stays verified.
+- `jevpilot-mcp doctor` checks `JEVPILOT_IMAGE_RESPONSES`, `JEVPILOT_SCREENSHOT_DIR` and `JEVPILOT_DISABLED_TOOLS` as the server does.
+
 ## [0.4.0] - 2026-10-06
 
 Downloads reach the agent, a call stops before the client's own timeout and keeps its session, and the package installs from npm. Two behavior changes: `browser_run` and `browser_resume` stop after 45 seconds by default (`JEVPILOT_CALL_DEADLINE_MS=0` restores the old behavior), and `browser_act`'s `allow_irreversible` approves only the first irreversible operation of the call.

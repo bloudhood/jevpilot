@@ -205,13 +205,13 @@ export async function observe(
   const started = performance.now();
   const maxWait =
     options.maxWaitMs === undefined ? Number.POSITIVE_INFINITY : Math.max(1, options.maxWaitMs);
-  const settleMs = await page.callIsolated(
-    waitForNavigationQuiet,
-    [options.settleNavigation === true],
-    {
-      timeoutMs: Math.min(3200, maxWait),
-    },
-  );
+  const remainingWait = () => maxWait - (performance.now() - started);
+  const settleMs =
+    options.maxWaitMs !== undefined && options.maxWaitMs < 250
+      ? 0
+      : await page.callIsolated(waitForNavigationQuiet, [options.settleNavigation === true], {
+          timeoutMs: Math.min(3200, maxWait),
+        });
   const snapshotStarted = performance.now();
   await page.callIsolated(installObserverLibrary, []);
   const snapshot = await page.callIsolated(pageSnapshot, [
@@ -230,21 +230,29 @@ export async function observe(
   let framesMs: number | undefined;
   let childFramesMs: number | undefined;
   if (page.capabilities.crossOriginFrames) {
-    const budget = Math.max(1, Math.min(options.frameTimeoutMs ?? 1000, maxWait));
+    const budget =
+      options.maxWaitMs === undefined
+        ? Math.max(1, options.frameTimeoutMs ?? 1000)
+        : Math.min(options.frameTimeoutMs ?? 1000, remainingWait());
     const framesStarted = performance.now();
-    const frames = await page.frames({ timeoutMs: budget, skipAdFrames: true });
+    const frames = budget > 0 ? await page.frames({ timeoutMs: budget, skipAdFrames: true }) : [];
+    if (budget <= 0) framesSkipped += snapshot.signals.iframeOrigins.length;
     framesSkipped += frames.framesSkipped ?? 0;
     framesMs = performance.now() - framesStarted;
     const frameHashes: string[] = [];
     const childrenStarted = performance.now();
     const children = await Promise.all(
       frames.map(async (frame) => {
-        const deadline = performance.now() + budget;
+        const childBudget = Math.min(budget, remainingWait());
+        if (childBudget <= 0) return undefined;
+        const deadline = performance.now() + childBudget;
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
           return await Promise.race([
             (async () => {
-              await frame.callIsolated(installObserverLibrary, [], { timeoutMs: budget });
+              await frame.callIsolated(installObserverLibrary, [], { timeoutMs: childBudget });
+              if (options.maxWaitMs !== undefined && deadline <= performance.now())
+                return undefined;
               return frame.callIsolated(
                 pageSnapshot,
                 [
@@ -258,11 +266,16 @@ export async function observe(
                       : {}),
                   },
                 ],
-                { timeoutMs: Math.max(1, Math.ceil(deadline - performance.now())) },
+                {
+                  timeoutMs:
+                    options.maxWaitMs === undefined
+                      ? Math.max(1, Math.ceil(deadline - performance.now()))
+                      : deadline - performance.now(),
+                },
               );
             })(),
             new Promise<never>((_resolve, reject) => {
-              timer = setTimeout(() => reject(new FrameGoneError()), budget);
+              timer = setTimeout(() => reject(new FrameGoneError()), childBudget);
             }),
           ]);
         } catch (error) {

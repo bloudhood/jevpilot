@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { selectOwnNpxInstalls } from "./pack-smoke-cleanup.mjs";
 import { spawn } from "node:child_process";
 import { access, mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -95,7 +96,7 @@ try {
   await check("packed package installs in a disposable project", () =>
     run(
       npm,
-      ["install", tarball, "--cache", cache, "--prefer-offline", "--no-audit", "--no-fund"],
+      ["install", tarball, "--cache", cache, "--offline", "--no-audit", "--no-fund"],
       project,
     ),
   );
@@ -134,8 +135,16 @@ try {
     });
   } finally {
     // Each tarball path gets its own npx install; drop this run's so the cache does not grow.
-    for (const entry of await readdir(npxCache).catch(() => []))
-      if (!before.has(entry)) await rm(join(npxCache, entry), { recursive: true, force: true });
+    const entries = await Promise.all(
+      (await readdir(npxCache).catch(() => [])).map(async (name) => ({
+        name,
+        packageJson: await readFile(join(npxCache, name, "package.json"), "utf8")
+          .then((contents) => JSON.parse(contents))
+          .catch(() => undefined),
+      })),
+    );
+    for (const entry of selectOwnNpxInstalls(entries, before, tarball))
+      await rm(join(npxCache, entry), { recursive: true, force: true });
   }
 } finally {
   await rm(temp, { recursive: true, force: true });

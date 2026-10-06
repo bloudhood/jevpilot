@@ -1,5 +1,15 @@
 import { randomUUID } from "node:crypto";
-import { lstat, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import {
+  constants,
+  copyFile,
+  link,
+  lstat,
+  readFile,
+  realpath,
+  rm,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { createOwnedTempDir } from "../util/owned-temp.ts";
 import { sanitizeDownloadName } from "../util/download.ts";
@@ -445,6 +455,8 @@ export class OrchestratorSession {
   private lastCoveredTarget?: string;
   private secretLiterals = new Set<string>();
   private readonly ownedPages = new Set<PageHandle>();
+  private readonly downloadPages = new Set<PageHandle>();
+  private verifiedDownloadCompleted = false;
   private readonly uploadDirectory = process.env.JEVPILOT_UPLOAD_DIR;
   private successAssertionsChecked = false;
   private successAssertionsIgnored = false;
@@ -510,14 +522,20 @@ export class OrchestratorSession {
   private attach(page: PageHandle): void {
     page.on("dialog", this.onDialog);
     page.on("popup", this.onPopup);
-    page.on("download", this.onDownload);
+    if (!this.downloadPages.has(page)) {
+      page.on("download", this.onDownload);
+      this.downloadPages.add(page);
+    }
     page.on("navigated", this.onNavigated);
     page.on("requestBlocked", this.onRequestBlocked);
   }
-  private detach(page: PageHandle): void {
+  private detach(page: PageHandle, closing = false): void {
     page.off("dialog", this.onDialog);
     page.off("popup", this.onPopup);
-    page.off("download", this.onDownload);
+    if (closing) {
+      page.off("download", this.onDownload);
+      this.downloadPages.delete(page);
+    }
     page.off("navigated", this.onNavigated);
     page.off("requestBlocked", this.onRequestBlocked);
   }
@@ -556,7 +574,7 @@ export class OrchestratorSession {
     this.downloadRecords.set(download.id, {
       id: download.id,
       // Scrubbed before the rename too, so neither the file on disk nor its reported path carries a secret.
-      name: this.scrub(sanitizeDownloadName(download.suggestedFilename)),
+      name: this.scrub(sanitizeDownloadName(this.scrub(download.suggestedFilename))),
       state: download.state === "canceled" ? "canceled" : "in_progress",
       ...(current?.path ? { path: current.path } : {}),
       ...(current?.size_bytes !== undefined ? { size_bytes: current.size_bytes } : {}),
@@ -589,24 +607,43 @@ export class OrchestratorSession {
         const info = await lstat(record.path);
         if (!info.isFile() || info.isSymbolicLink())
           throw new Error("download is not a regular file");
-        const size = (await stat(record.path)).size;
-        const target = join(root, `${record.id.slice(0, 8)}-${record.name}`);
-        try {
-          await lstat(target);
-          record.state = "completed";
-          record.size_bytes = size;
-          delete record.pendingVerification;
-          continue;
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        const size = info.size;
+        let target: string;
+        for (let suffix = 1; ; suffix++) {
+          target = join(
+            root,
+            `${record.id.slice(0, 8)}-${suffix === 1 ? "" : `${suffix}-`}${record.name}`,
+          );
+          try {
+            await link(record.path, target);
+            break;
+          } catch (error) {
+            const code = (error as NodeJS.ErrnoException).code;
+            if (code === "EEXIST") continue;
+            // Filesystems without hard links (FAT, some network shares): an exclusive copy also
+            // refuses to replace an existing file.
+            if (!["EPERM", "ENOTSUP", "EXDEV", "ENOSYS"].includes(code ?? "")) throw error;
+            try {
+              await copyFile(record.path, target, constants.COPYFILE_EXCL);
+              break;
+            } catch (copyError) {
+              if ((copyError as NodeJS.ErrnoException).code !== "EEXIST") throw copyError;
+            }
+          }
         }
-        try {
-          await rename(record.path, target);
-          record.path = target;
-        } catch {
-          /* keep GUID path */
-        }
+        await unlink(record.path);
+        const finalInfo = await lstat(target);
+        const finalPath = await realpath(target);
+        if (
+          !finalInfo.isFile() ||
+          finalInfo.isSymbolicLink() ||
+          finalInfo.size !== size ||
+          !finalPath.startsWith(`${root}${sep}`)
+        )
+          throw new Error("download verification failed");
+        record.path = target;
         record.state = "completed";
+        this.verifiedDownloadCompleted = true;
         record.size_bytes = size;
         delete record.pendingVerification;
       } catch {
@@ -1158,7 +1195,8 @@ export class OrchestratorSession {
     this.sampleVersion = version;
     this.lastObservation = observation;
     if (
-      this.navigation?.failure === "timeout" &&
+      (this.navigation?.failure === "timeout" ||
+        this.navigation?.failure === "call_deadline_exceeded") &&
       (observation.elements.length || observation.text.trim())
     ) {
       const { failure: _failure, ...navigation } = this.navigation;
@@ -1290,7 +1328,8 @@ export class OrchestratorSession {
       await this.sample({ settleNavigation: true });
       return this.result("RUNNING", "observation");
     } catch (error) {
-      if (error instanceof PageUnresponsiveError) return this.unresponsiveHandoff();
+      if (error instanceof PageUnresponsiveError)
+        return this.deadlineExceeded() ? this.deadlineResult() : this.unresponsiveHandoff();
       if (this.staleFrame(error)) return this.staleHandoff();
       throw error;
     }
@@ -1311,7 +1350,7 @@ export class OrchestratorSession {
       const outside = this.allowed(navigation.url);
       if (outside) throw new Error(`isolated navigation left allowed domains: ${outside}`);
       const previous = this.page;
-      this.detach(previous);
+      this.detach(previous, true);
       this.page = replacement;
       this.attach(replacement);
       this.ownedPages.add(replacement);
@@ -1369,7 +1408,7 @@ export class OrchestratorSession {
       this.pageUnresponsive = false;
       return undefined;
     } catch {
-      return this.unresponsiveHandoff();
+      return this.deadlineExceeded() ? this.deadlineResult() : this.unresponsiveHandoff();
     }
   }
   private async fresh(sampled?: { observation: Observation; findings: Finding[] }): Promise<{
@@ -1386,22 +1425,29 @@ export class OrchestratorSession {
       current = await this.sample();
     return current;
   }
-  private async waitForContent(sampled: {
-    observation: Observation;
-    findings: Finding[];
-  }): Promise<{
-    observation: Observation;
-    findings: Finding[];
-  }> {
+  private async waitForContent(sampled: { observation: Observation; findings: Finding[] }): Promise<
+    | {
+        observation: Observation;
+        findings: Finding[];
+      }
+    | SessionResult
+  > {
     let current = sampled;
     for (
       let elapsed = 0;
       elapsed < 3000 && !current.observation.elements.length && !current.observation.text.trim();
       elapsed += 500
     ) {
-      await this.deps.sleep(500);
+      if (this.deadlineExceeded()) return this.deadlineResult();
+      await this.deps.sleep(Math.max(0, Math.min(500, this.remainingInvocationMs())));
       current = await this.fresh();
     }
+    if (
+      this.deadlineExceeded() &&
+      !current.observation.elements.length &&
+      !current.observation.text.trim()
+    )
+      return this.deadlineResult();
     return current;
   }
   private hasOriginSecret(url: string): boolean {
@@ -1428,13 +1474,21 @@ export class OrchestratorSession {
     let current = sampled;
     let blocker = this.topBlocker(current.findings);
     if (blocker?.kind === "challenge" && blocker.autoPassPlausible) {
-      const until = this.deps.now() + this.autoPassWindowMs;
+      const until =
+        this.deps.now() +
+        Math.max(0, Math.min(this.autoPassWindowMs, this.remainingInvocationMs()));
       while (this.deps.now() < until) {
-        await this.deps.sleep(Math.min(1000, until - this.deps.now()));
+        if (this.deadlineExceeded())
+          return { sampled: current, handoff: await this.deadlineResult() };
+        await this.deps.sleep(
+          Math.max(0, Math.min(1000, until - this.deps.now(), this.remainingInvocationMs())),
+        );
         current = await this.sample();
         blocker = this.topBlocker(current.findings);
         if (blocker?.kind !== "challenge") break;
       }
+      if (this.deadlineExceeded())
+        return { sampled: current, handoff: await this.deadlineResult() };
     }
     if (!blocker) return { sampled: current };
     const mapped = blockingHandoff(blocker);
@@ -1469,18 +1523,13 @@ export class OrchestratorSession {
           !this.nonEvidencePages.has(current) &&
           (!this.success.url_matches || new RegExp(this.success.url_matches).test(current.url)) &&
           pageMatched &&
-          (!downloadRequired ||
-            [...this.downloadRecords.values()].some((entry) => entry.state === "completed"));
+          (!downloadRequired || this.verifiedDownloadCompleted);
       } catch (error) {
         if (error instanceof PageUnresponsiveError) throw error;
         matched = false;
       }
       if (version === this.navigationVersion) {
-        if (
-          downloadRequired &&
-          ![...this.downloadRecords.values()].some((entry) => entry.state === "completed")
-        )
-          return false;
+        if (downloadRequired && !this.verifiedDownloadCompleted) return false;
         return matched;
       }
     }
@@ -1617,6 +1666,7 @@ export class OrchestratorSession {
     },
     observation: Observation,
     typedValues?: readonly string[],
+    strictIdentity = false,
   ): Action | undefined {
     let matches = observation.elements.filter(
       (item) =>
@@ -1635,6 +1685,13 @@ export class OrchestratorSession {
     }
     if (matches.length !== 1) return undefined;
     const item = matches[0]!;
+    // Approval belongs to one row: after all narrowing, the remaining match must be in that row.
+    if (
+      strictIdentity &&
+      identity.containerText !== undefined &&
+      item.containerText !== identity.containerText
+    )
+      return undefined;
     return withTarget(action, {
       epoch: observation.epoch,
       ref: item.ref,
@@ -1725,15 +1782,19 @@ export class OrchestratorSession {
         const retryValues = await this.valueFor(retryAction);
         if (!("status" in retryValues)) {
           this.checkCancellation();
+          if (this.deadlineExceeded()) return this.deadlineResult();
           const retryResult = await this.deps.executeAction(
             this.page,
             current.observation,
             retryAction,
             retryValues,
             {
-              navigationTimeoutMs: this.navigationTimeoutMs,
-              waitTimeoutMs: 1000,
-              actionabilityTimeoutMs: this.actionabilityTimeoutMs,
+              navigationTimeoutMs: this.cappedTimeout(this.navigationTimeoutMs),
+              waitTimeoutMs: Math.max(0, Math.min(1000, this.remainingInvocationMs())),
+              actionabilityTimeoutMs: this.cappedTimeout(this.actionabilityTimeoutMs),
+              ...(this.invocationDeadlineAt !== undefined
+                ? { observeMaxWaitMs: this.cappedTimeout(3200) }
+                : {}),
               strictIdentity: true,
             },
           );
@@ -1852,6 +1913,8 @@ export class OrchestratorSession {
     }
     const started = this.deps.now();
     const actionVersion = this.navigationVersion;
+    const dispatchPage = this.page;
+    const dispatchUrl = observation.url;
     // browser_resume's approved pending action is consumed when it starts, even if the call then
     // yields at its deadline, so a later resume cannot run it twice. Other actions leave it alone.
     if (this.dispatchingPending) {
@@ -1872,8 +1935,26 @@ export class OrchestratorSession {
           Math.min(this.actionabilityTimeoutMs, this.remainingInvocationMs()),
         ),
         strictIdentity: approved || Boolean(matched) || Boolean(this.pendingGatedAction),
+        ...(this.invocationDeadlineAt !== undefined
+          ? { observeMaxWaitMs: this.cappedTimeout(3200) }
+          : {}),
       });
     } catch (error) {
+      if (error instanceof PageUnresponsiveError) {
+        this.pageUnresponsive = true;
+        this.trace.push({
+          step: this.steps,
+          op: action.kind,
+          target: element ? { role: element.role, name: this.scrub(element.name) } : undefined,
+          // Trace schema has no uncertain action outcome; unstable is the closest existing marker.
+          outcome: "unstable",
+          ms: Math.max(0, this.deps.now() - started),
+        });
+        return this.handoff("uncertain", {
+          missing: `the page stopped responding while ${action.kind} ${element?.name ?? "the target"} was being performed; it may or may not have taken effect, so check the page before repeating it`,
+          url: observation.url,
+        });
+      }
       if (error instanceof Error && error.name === "UnknownKeyError")
         return this.handoff("uncertain", { missing: error.message });
       if (!this.staleFrame(error)) throw error;
@@ -1886,7 +1967,6 @@ export class OrchestratorSession {
     // cancellation is checked only before the next step begins.
     const ms = Math.max(0, this.deps.now() - started);
     this.lastExecutedActionAt = this.deps.now();
-    if (this.deadlineExceeded() && (result.timings.waitMs ?? 0) > 0) return this.deadlineResult();
     if (result.outcome === "not-focusable")
       return this.handoff("uncertain", { missing: "target cannot be focused" });
     if (
@@ -2086,18 +2166,31 @@ export class OrchestratorSession {
         ["listbox", "menu", "tooltip", "combobox"].includes(result.coveredBy.role)
       ) {
         this.checkCancellation();
+        if (!manual && this.deadlineExceeded()) return this.deadlineResult();
         await this.page.key("Escape");
         const refreshed = await this.fresh();
-        const retry = this.retargetAction(action, element, refreshed.observation);
+        const retry = this.retargetAction(
+          action,
+          element,
+          refreshed.observation,
+          undefined,
+          approved,
+        );
         if (retry)
           return this.execute(
             retry,
             confidence,
-            approved,
+            approved &&
+              this.page === dispatchPage &&
+              samePage(dispatchUrl, refreshed.observation.url),
             batchStep ?? this.steps,
             true,
             false,
-            callApproval,
+            approved &&
+              this.page === dispatchPage &&
+              samePage(dispatchUrl, refreshed.observation.url)
+              ? callApproval
+              : undefined,
           );
       }
     } else delete this.lastCoveredTarget;
@@ -2107,16 +2200,18 @@ export class OrchestratorSession {
     if (await this.verified(next.observation))
       return this.result("DONE_VERIFIED", "success_assertions_met");
     if (result.outcome === "stale" && !retriedStale && element) {
-      const refreshed = this.retargetAction(action, element, next.observation);
+      const refreshed = this.retargetAction(action, element, next.observation, undefined, approved);
       if (refreshed)
         return this.execute(
           refreshed,
           confidence,
-          approved,
+          approved && this.page === dispatchPage && samePage(dispatchUrl, next.observation.url),
           batchStep ?? this.steps,
           true,
           false,
-          callApproval,
+          approved && this.page === dispatchPage && samePage(dispatchUrl, next.observation.url)
+            ? callApproval
+            : undefined,
         );
     }
     if (batchStep === undefined && this.exceeded()) return this.budgetResult();
@@ -2154,7 +2249,9 @@ export class OrchestratorSession {
         this.checkCancellation();
         let sampled = await this.fresh(this.queuedSample);
         delete this.queuedSample;
-        sampled = await this.waitForContent(sampled);
+        const content = await this.waitForContent(sampled);
+        if ("status" in content) return content;
+        sampled = content;
         if (!sampled.observation.elements.length && !sampled.observation.text.trim())
           return this.handoff("uncertain", {
             missing: "page appears empty",
@@ -2362,6 +2459,12 @@ export class OrchestratorSession {
           this.steps++;
           this.invocationSteps++;
           for (const planned of outcome.actions) {
+            if (
+              ranAction &&
+              this.invocationDeadlineAt !== undefined &&
+              this.deps.now() >= this.invocationDeadlineAt
+            )
+              return this.deadlineResult();
             if (!planned.valueKey || batchKeys.has(planned.valueKey)) continue;
             batchKeys.add(planned.valueKey);
             const current = this.lastObservation;
@@ -2403,6 +2506,7 @@ export class OrchestratorSession {
     } catch (error) {
       this.checkCancellation();
       if (error instanceof PageUnresponsiveError) {
+        if (this.deadlineExceeded()) return this.deadlineResult();
         const recovery = await this.unresponsiveHandoff();
         return recovery.reason === "isolated_reopen" ? this.runLoop() : recovery;
       }
@@ -2438,6 +2542,7 @@ export class OrchestratorSession {
       Object.assign(this.values, update.values);
       for (const key of Object.keys(update.values ?? {})) this.consumedKeys.delete(key);
       if (update.goal_update !== undefined) {
+        delete this.pendingGatedAction;
         if (this.success && !this.successAssertionsIgnored && this.lastObservation) {
           this.successAssertionsIgnored = await this.verified(this.lastObservation);
           if (this.successAssertionsIgnored)
@@ -2456,6 +2561,7 @@ export class OrchestratorSession {
           if (answered) return answered;
         } catch (error) {
           if (error instanceof PageUnresponsiveError) {
+            if (this.deadlineExceeded()) return this.deadlineResult();
             const recovery = await this.unresponsiveHandoff();
             return recovery.reason === "isolated_reopen" ? this.runLoop() : recovery;
           }
@@ -2475,7 +2581,7 @@ export class OrchestratorSession {
           const current = await this.sample();
           if (this.exceeded()) return this.budgetResult();
           const refreshed = samePage(pending.url, current.observation.url)
-            ? this.retargetAction(pending.action, pending, current.observation)
+            ? this.retargetAction(pending.action, pending, current.observation, undefined, true)
             : undefined;
           if (!refreshed) {
             delete this.pendingGatedAction;
@@ -2493,11 +2599,15 @@ export class OrchestratorSession {
           } finally {
             this.dispatchingPending = false;
           }
-          if (result === undefined || result.reason !== "call_deadline_exceeded")
+          if (
+            (result === undefined || result.reason !== "call_deadline_exceeded") &&
+            this.pendingGatedAction === pending
+          )
             delete this.pendingGatedAction;
           if (result) return result;
         } catch (error) {
           if (error instanceof PageUnresponsiveError) {
+            if (this.deadlineExceeded()) return this.deadlineResult();
             const recovery = await this.unresponsiveHandoff();
             return recovery.reason === "isolated_reopen" ? this.runLoop() : recovery;
           }
@@ -2721,7 +2831,8 @@ export class OrchestratorSession {
       }
       return this.result("RUNNING", "manual_actions_complete");
     } catch (error) {
-      if (error instanceof PageUnresponsiveError) return this.unresponsiveHandoff();
+      if (error instanceof PageUnresponsiveError)
+        return this.deadlineExceeded() ? this.deadlineResult() : this.unresponsiveHandoff();
       if (this.staleFrame(error)) return this.recoverStale(version);
       return this.result("FAILED", "operation_failed", { failure: failureDetails(error) });
     } finally {
@@ -2762,7 +2873,8 @@ export class OrchestratorSession {
         );
       return result;
     } catch (error) {
-      if (error instanceof PageUnresponsiveError) return this.unresponsiveHandoff();
+      if (error instanceof PageUnresponsiveError)
+        return this.deadlineExceeded() ? this.deadlineResult() : this.unresponsiveHandoff();
       if (this.staleFrame(error)) return this.recoverStale(version);
       return this.result("FAILED", "operation_failed", { failure: failureDetails(error) });
     }
@@ -2785,7 +2897,8 @@ export class OrchestratorSession {
     } catch (error) {
       // The hung tab is still the session page when opening a replacement fails.
       if (replace) return this.unresponsiveHandoff();
-      if (error instanceof PageUnresponsiveError) return this.unresponsiveHandoff();
+      if (error instanceof PageUnresponsiveError)
+        return this.deadlineExceeded() ? this.deadlineResult() : this.unresponsiveHandoff();
       if (this.staleFrame(error)) return this.recoverStale(version);
       throw error;
     }
@@ -2821,7 +2934,8 @@ export class OrchestratorSession {
       try {
         sampled = await this.sample();
       } catch (error) {
-        if (error instanceof PageUnresponsiveError) return this.unresponsiveHandoff();
+        if (error instanceof PageUnresponsiveError)
+          return this.deadlineExceeded() ? this.deadlineResult() : this.unresponsiveHandoff();
         if (this.staleFrame(error)) return this.recoverStale(version);
         throw error;
       }
@@ -2862,7 +2976,7 @@ export class OrchestratorSession {
     if (!page) return this.handoff("uncertain", { missing: "tab not found" });
     if (this.ownedPages.size === 1)
       return this.handoff("uncertain", { missing: "cannot close the only tab" });
-    this.detach(page);
+    this.detach(page, true);
     await page.close();
     this.ownedPages.delete(page);
     if (this.page === page) {
@@ -2965,7 +3079,7 @@ export class OrchestratorSession {
   async close(): Promise<void> {
     if (this.closing) return this.closing;
     this.closed = true;
-    this.detach(this.page);
+    for (const page of this.ownedPages) this.detach(page, true);
     this.closing = (async () => {
       try {
         const closes = await Promise.allSettled([...this.ownedPages].map((page) => page.close()));

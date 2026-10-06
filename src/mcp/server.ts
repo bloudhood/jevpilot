@@ -13,8 +13,7 @@ const mountTools = (host: ToolHost, deps: McpDeps): void => {
   }
 };
 
-function validateDisabledTools(deps: McpDeps): void {
-  const disabled = deps.disabledTools;
+export function validateDisabledTools(disabled: string[] | undefined): void {
   if (!disabled?.length) return;
   for (const name of disabled) {
     if (name === "browser_run" || name === "browser_close")
@@ -29,7 +28,7 @@ export function createServer(deps: McpDeps): {
   createMcpServer: () => McpServer;
   close: () => Promise<void>;
 } {
-  validateDisabledTools(deps);
+  validateDisabledTools(deps.disabledTools);
   const host = new ToolHost(deps);
   mountTools(host, deps);
   const server = host.mcpServer;

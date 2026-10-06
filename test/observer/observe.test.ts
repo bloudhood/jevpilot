@@ -46,13 +46,111 @@ test("observe settles and applies budget, ranking and formatting", async () => {
   assert.ok(estimateTokens(formatObservation(state)) <= 3000);
 });
 
-test("slow observation cannot add a full timeout", async () => {
-  const snapshot = observation([]);
-  const { timings: _timings, ...scriptedSnapshot } = snapshot;
-  const page = new FakePageHandle(scriptedSnapshot);
-  await observe(page, { maxWaitMs: 17 });
-  assert.equal(page.timeouts[0], 17);
-  assert.ok(page.timeouts.every((timeout) => timeout <= 17));
+test("near the deadline observation skips the quiet wait", async () => {
+  for (const maxWaitMs of [100, 1000]) {
+    const { timings: _timings, ...snapshot } = observation([]);
+    const page = new FakePageHandle(snapshot);
+    const state = await observe(page, { maxWaitMs });
+    assert.equal(
+      page.calls.some((call) => call.name === "waitForNavigationQuiet"),
+      maxWaitMs === 1000,
+    );
+    if (maxWaitMs === 100) assert.equal(state.timings.settleMs, 0);
+    else assert.ok(page.timeouts[0]! <= 1000);
+  }
+});
+
+test("frames share the observation's remaining time", async (context) => {
+  let clock = 0;
+  context.mock.method(performance, "now", () => clock);
+  for (const mainMs of [260, 300]) {
+    clock = 0;
+    const { timings: _timings, ...snapshot } = observation([
+      element(1, "frame one", { role: "frame" }),
+      element(2, "frame two", { role: "frame" }),
+    ]);
+    // Includes a hidden frame that has no visible element placeholder.
+    snapshot.signals.iframeOrigins = [
+      "https://one.test",
+      "https://two.test",
+      "https://hidden.test",
+    ];
+    const page = new FakePageHandle();
+    page.callIsolated = async (fn) => {
+      if (fn.name === "pageSnapshot") clock += mainMs;
+      return (fn.name === "pageSnapshot" ? snapshot : 0) as Awaited<ReturnType<typeof fn>>;
+    };
+    const budgets: number[] = [];
+    const childBudgets: number[] = [];
+    page.frames = async (options) => {
+      budgets.push(options!.timeoutMs!);
+      clock += 10;
+      return [
+        {
+          id: "child",
+          offset: { x: 0, y: 0 },
+          async callIsolated(fn, _args, options) {
+            childBudgets.push(options!.timeoutMs!);
+            clock += 5;
+            return (fn.name === "pageSnapshot" ? observation([]) : undefined) as Awaited<
+              ReturnType<typeof fn>
+            >;
+          },
+        },
+      ];
+    };
+    const state = await observe(page, { maxWaitMs: 300 });
+    if (mainMs === 260) {
+      assert.deepEqual(budgets, [40]);
+      assert.deepEqual(childBudgets, [30, 25]);
+    } else {
+      assert.deepEqual(budgets, []);
+      assert.equal(state.timings.framesSkipped, 3);
+    }
+  }
+  // Discovery itself can exhaust the budget: count every returned frame without calling it.
+  clock = 0;
+  const { timings: _timings, ...snapshot } = observation([]);
+  const page = new FakePageHandle(snapshot);
+  page.frames = async () => {
+    clock = 300;
+    return ["one", "two"].map((id) => ({
+      id,
+      offset: { x: 0, y: 0 },
+      async callIsolated() {
+        assert.fail("expired child must not be called");
+      },
+    }));
+  };
+  assert.equal((await observe(page, { maxWaitMs: 300 })).timings.framesSkipped, 2);
+});
+
+test("slow observation cannot add a full timeout", async (context) => {
+  let clock = 0;
+  context.mock.method(performance, "now", () => clock);
+  const { timings: _timings, ...snapshot } = observation([]);
+  const page = new FakePageHandle();
+  const settleBudgets: number[] = [];
+  page.callIsolated = async (fn, _args, options) => {
+    if (fn.name === "waitForNavigationQuiet") {
+      settleBudgets.push(options!.timeoutMs!);
+      clock += 180;
+      return 180 as Awaited<ReturnType<typeof fn>>;
+    }
+    if (fn.name === "pageSnapshot") clock += 100;
+    return (fn.name === "pageSnapshot" ? snapshot : undefined) as Awaited<ReturnType<typeof fn>>;
+  };
+  const frameBudgets: number[] = [];
+  page.frames = async (options) => {
+    frameBudgets.push(options!.timeoutMs!);
+    clock += options!.timeoutMs!;
+    return [];
+  };
+  const state = await observe(page, { maxWaitMs: 300, settleNavigation: true });
+  assert.deepEqual(settleBudgets, [300]);
+  assert.equal(state.timings.settleMs, 180);
+  assert.deepEqual(frameBudgets, [20]);
+  assert.ok(state.timings.totalMs <= 300);
 });
 
 test("observe requests a quiet wait for same-URL navigation events", async () => {

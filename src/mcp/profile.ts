@@ -1,5 +1,6 @@
 import { readFile, stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
+import { existsSync, statSync } from "node:fs";
 import { createOwnedTempDir, removeTempDir } from "../util/owned-temp.ts";
 import {
   BrowserConfigError,
@@ -8,6 +9,28 @@ import {
   type BrowserProfile,
 } from "../engine/default.ts";
 import { McpUserError } from "./errors.ts";
+
+export function parseImageResponses(value: string | undefined): "allow" | "omit" | undefined {
+  if (value === undefined) return undefined;
+  if (value === "allow" || value === "omit") return value;
+  throw new McpUserError("JEVPILOT_IMAGE_RESPONSES must be allow or omit.");
+}
+export function parseScreenshotDir(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (!isAbsolute(value))
+    throw new McpUserError("JEVPILOT_SCREENSHOT_DIR must be an absolute path.");
+  if (!existsSync(value) || !statSync(value).isDirectory())
+    throw new McpUserError("JEVPILOT_SCREENSHOT_DIR must be an existing directory.");
+  return value;
+}
+export function parseDisabledTools(value: string | undefined): string[] | undefined {
+  if (value === undefined) return undefined;
+  const names = value
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean);
+  return names.length ? names : undefined;
+}
 
 export const DEFAULT_CALL_DEADLINE_MS = 45_000;
 

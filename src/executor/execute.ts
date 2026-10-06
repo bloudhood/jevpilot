@@ -3,7 +3,12 @@ import { NavigationInProgressError, PageUnresponsiveError } from "../engine/type
 import { observe } from "../observer/observe.ts";
 import { focusRef, resolveRef, waitForRef } from "../observer/page-snapshot.ts";
 import type { Observation, RefResolution } from "../observer/types.ts";
-import { ActionValidationError, type Action, type ActionResult } from "./types.ts";
+import {
+  ActionValidationError,
+  type Action,
+  type ActionResult,
+  type ExecuteOptions,
+} from "./types.ts";
 
 const emptyChanges = (): ActionResult["changes"] => ({
   url: false,
@@ -314,13 +319,7 @@ export async function executeAction(
   before: Observation,
   action: Action,
   values: Readonly<Record<string, string>> = {},
-  options: {
-    navigationTimeoutMs?: number;
-    actionabilityTimeoutMs?: number;
-    waitTimeoutMs?: number;
-    popupWaitMs?: number;
-    strictIdentity?: boolean;
-  } = {},
+  options: ExecuteOptions = {},
 ): Promise<ActionResult> {
   const started = performance.now();
   if (!page.capabilities.trustedInput && action.kind !== "wait")
@@ -660,7 +659,10 @@ export async function executeAction(
       resolveMs = performance.now() - resolveStart;
     }
     const observeStart = performance.now();
-    const after = await observe(page, { settleNavigation: navigationBegun });
+    const after = await observe(page, {
+      settleNavigation: navigationBegun,
+      ...(options.observeMaxWaitMs !== undefined ? { maxWaitMs: options.observeMaxWaitMs } : {}),
+    });
     observeMs = performance.now() - observeStart;
     observeFramesMs = after.timings.framesMs;
     observeChildFramesMs = after.timings.childFramesMs;

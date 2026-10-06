@@ -1,8 +1,6 @@
 #!/usr/bin/env node
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute } from "node:path";
 import { isProcessAlive, sweepStaleTempDirs } from "../util/owned-temp.ts";
 import { createDecisionPort } from "../decision/port.ts";
 import { loadDecisionConfig, redactDecisionConfig } from "../decision/config.ts";
@@ -13,37 +11,16 @@ import {
   parseActionabilityTimeout,
   parseCallDeadline,
   parseNavigationTimeout,
+  parseImageResponses,
+  parseScreenshotDir,
+  parseDisabledTools,
 } from "./profile.ts";
 import { installProcessSafety } from "./process-safety.ts";
 import { parseThresholds } from "./thresholds.ts";
-import { createServer } from "./server.ts";
+import { createServer, validateDisabledTools } from "./server.ts";
 import { parseNetworkGuard, parseMaxSessions } from "./network-guard.ts";
 import { parseHttpConfig, startHttpServer } from "./http.ts";
 import { runDoctor } from "./doctor.ts";
-
-function parseImageResponses(value: string | undefined): "allow" | "omit" | undefined {
-  if (value === undefined) return undefined;
-  if (value === "allow" || value === "omit") return value;
-  throw new McpUserError("JEVPILOT_IMAGE_RESPONSES must be allow or omit.");
-}
-
-function parseScreenshotDir(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  if (!isAbsolute(value))
-    throw new McpUserError("JEVPILOT_SCREENSHOT_DIR must be an absolute path.");
-  if (!existsSync(value) || !statSync(value).isDirectory())
-    throw new McpUserError("JEVPILOT_SCREENSHOT_DIR must be an existing directory.");
-  return value;
-}
-
-function parseDisabledTools(value: string | undefined): string[] | undefined {
-  if (value === undefined) return undefined;
-  const names = value
-    .split(",")
-    .map((name) => name.trim())
-    .filter(Boolean);
-  return names.length ? names : undefined;
-}
 
 async function main(): Promise<void> {
   if (process.argv[2] === "doctor") {
@@ -95,6 +72,7 @@ async function main(): Promise<void> {
   const imageResponses = parseImageResponses(env.JEVPILOT_IMAGE_RESPONSES);
   const screenshotDir = parseScreenshotDir(env.JEVPILOT_SCREENSHOT_DIR);
   const disabledTools = parseDisabledTools(env.JEVPILOT_DISABLED_TOOLS);
+  validateDisabledTools(disabledTools);
   const loaded = await loadMcpProfile(env);
   let app: ReturnType<typeof createServer>;
   try {

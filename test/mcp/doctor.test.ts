@@ -3,6 +3,8 @@ import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { runDoctor } from "../../src/mcp/doctor.ts";
 import type { BrowserHandle, EngineDriver, LaunchOptions } from "../../src/engine/types.ts";
 import type { DecisionPort } from "../../src/decision/types.ts";
@@ -299,5 +301,62 @@ test("R8: doctor finishes and reports when the decision service keeps failing wi
     assert.equal(result.code, 1);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test("doctor rejects what the server rejects", async () => {
+  for (const [name, value, message] of [
+    ["JEVPILOT_IMAGE_RESPONSES", "bad", "JEVPILOT_IMAGE_RESPONSES must be allow or omit."],
+    [
+      "JEVPILOT_SCREENSHOT_DIR",
+      "relative-dir",
+      "JEVPILOT_SCREENSHOT_DIR must be an absolute path.",
+    ],
+    [
+      "JEVPILOT_DISABLED_TOOLS",
+      "browser_close",
+      "browser_run and browser_close cannot be disabled.",
+    ],
+    [
+      "JEVPILOT_DISABLED_TOOLS",
+      "unknown_tool",
+      "Unknown tool in JEVPILOT_DISABLED_TOOLS: unknown_tool.",
+    ],
+  ] as const) {
+    const testEnv = { JEVPILOT_USER_DATA_DIR: "doctor-test-profile", [name]: value };
+    const client = new Client({ name: "doctor-parity", version: "1" });
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [fileURLToPath(new URL("../../src/mcp/main.ts", import.meta.url))],
+      env: {
+        ...Object.fromEntries(
+          Object.entries(process.env).filter(
+            (entry): entry is [string, string] => entry[1] !== undefined,
+          ),
+        ),
+        ...testEnv,
+      },
+      stderr: "pipe",
+    });
+    let stderr = "";
+    transport.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+    try {
+      await assert.rejects(client.connect(transport));
+      assert.ok(stderr.includes(message), stderr);
+    } finally {
+      await client.close();
+    }
+    const report = await runDoctor({ env: testEnv, noBrowser: true, out: () => {}, ...temp });
+    assert.equal(report.ok, false);
+    assert.deepEqual(
+      report.checks.find((check) => check.name === "config"),
+      {
+        name: "config",
+        status: "fail",
+        detail: message,
+      },
+    );
   }
 });

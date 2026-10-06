@@ -14,6 +14,7 @@ import { sessionResultSchema } from "../../src/orchestrator/result.ts";
 import { BrowserConfigError } from "../../src/engine/default.ts";
 import { EngineRegistry } from "../../src/engine/registry.ts";
 import { CdpTimeoutError } from "../../src/browser/errors.ts";
+import { PageUnresponsiveError } from "../../src/engine/types.ts";
 import { createServer } from "../../src/mcp/server.ts";
 import { DEFAULT_CALL_DEADLINE_MS, parseCallDeadline } from "../../src/mcp/profile.ts";
 import { fakeMcpDeps, fakeObservation } from "../support/mcp-fixture.ts";
@@ -410,7 +411,10 @@ test("slow navigation after click yields without repeating click", async () => {
   let now = 0;
   deps.clock = () => now;
   deps.callDeadlineMs = 10;
-  deps.orchestrator!.pageMatches = async () => actions >= 1;
+  // Success only shows up later: a verified page at the end of the first call would be DONE_VERIFIED
+  // there, and this test is about the yield and the following resume.
+  let resumed = false;
+  deps.orchestrator!.pageMatches = async () => resumed && actions >= 1;
   let actions = 0;
   deps.orchestrator!.executeAction = async (_p, _o, _a, _v, options) => {
     actions++;
@@ -439,6 +443,7 @@ test("slow navigation after click yields without repeating click", async () => {
       }),
     );
     assert.equal(first.reason, "call_deadline_exceeded");
+    resumed = true;
     const second = data(
       await client.callTool({ name: "browser_resume", arguments: { session: first.session } }),
     );
@@ -514,7 +519,7 @@ test("unknown input outcome is not auto-retried", async () => {
   let actions = 0;
   deps.orchestrator!.executeAction = async () => {
     actions++;
-    throw new CdpTimeoutError("input timed out");
+    throw new PageUnresponsiveError();
   };
   let decisions = 0;
   deps.orchestrator!.interpret = () =>
@@ -537,7 +542,38 @@ test("unknown input outcome is not auto-retried", async () => {
       }),
     );
     assert.equal(actions, 1);
-    assert.ok(!String(result.status).startsWith("DONE_"));
+    assert.equal(result.status, "UNCERTAIN");
+    assert.match(String(result.question), /may or may not have taken effect/u);
+  } finally {
+    await client.close();
+    await app.close();
+  }
+});
+
+test("manual act with unknown input outcome is not reopened", async () => {
+  const deps = fakeMcpDeps();
+  let actions = 0;
+  deps.orchestrator!.executeAction = async () => {
+    actions++;
+    throw new PageUnresponsiveError();
+  };
+  const app = createServer(deps);
+  const client = new Client({ name: "manual-unknown", version: "1" });
+  const [left, right] = InMemoryTransport.createLinkedPair();
+  await app.server.connect(right);
+  await client.connect(left);
+  try {
+    const run = data(await client.callTool({ name: "browser_run", arguments: { goal: "Finish" } }));
+    const result = data(
+      await client.callTool({
+        name: "browser_act",
+        arguments: { session: String(run.session), ops: [{ action: "scroll", direction: "down" }] },
+      }),
+    );
+    assert.equal(actions, 1);
+    assert.equal(deps.launches(), 1);
+    assert.equal(result.status, "UNCERTAIN");
+    assert.match(String(result.question), /may or may not have taken effect/u);
   } finally {
     await client.close();
     await app.close();
