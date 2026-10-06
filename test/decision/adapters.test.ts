@@ -4,6 +4,7 @@ import {
   createDecisionPort,
   DecisionConfigError,
   DecisionTransportError,
+  extractProviderError,
   parseResponse,
   prepareRequest,
 } from "../../src/index.ts";
@@ -109,6 +110,29 @@ describe("adapter wire contracts", () => {
 });
 
 describe("adapter responses", () => {
+  test("provider validation details reach the error", () => {
+    const detail = [
+      {
+        type: "string_type",
+        loc: ["body", "questions", "relevance", "score", "criteria", 0, "str"],
+        msg: "Input should be a valid string",
+        input: 1,
+      },
+      {
+        type: "string_type",
+        loc: ["body", "questions", "relevance", "score", "criteria", 1, "str"],
+        msg: "Input should be a valid string",
+        input: 2,
+      },
+      { type: "x", loc: ["body", "secret"], msg: "bad test-secret", input: 3 },
+      { type: "x", loc: ["body", "fourth"], msg: "ignored", input: 4 },
+    ];
+    assert.equal(
+      extractProviderError({ detail }).providerMessage,
+      "questions.relevance.score.criteria.0.str: Input should be a valid string; questions.relevance.score.criteria.1.str: Input should be a valid string; secret: bad test-secret",
+    );
+    assert.equal(extractProviderError({ detail: "plain reason" }).providerMessage, "plain reason");
+  });
   for (const provider of ["typesafe", "openrouter", "cloudflare", "custom"] as const) {
     test(`${provider} parses its fixture answers`, () => {
       assert.deepEqual(parseResponse(config(provider), fixture(provider)).answers, answers);

@@ -2231,7 +2231,21 @@
                   },
                   "criteria": {
                     "type": "array",
-                    "items": {}
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": {}
+                        },
+                        {
+                          "type": "array",
+                          "items": {}
+                        }
+                      ]
+                    }
                   }
                 },
                 "required": ["type", "instructions", "criteria"],

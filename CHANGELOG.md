@@ -2,6 +2,14 @@
 
 This project follows Keep a Changelog. Versions use Semantic Versioning.
 
+## [0.4.2] - 2026-10-06
+
+`jev_decide` handles score questions and explains rejected requests. Browser tools are unchanged. No configuration changes.
+
+### Fixed
+
+- `jev_decide` accepts Jev score answers, validates score levels before sending, and reports actionable provider rejection reasons.
+
 ## [0.4.1] - 2026-10-06
 
 Fixes from a review of 0.4.0: an approval applies only to its own target, an action whose outcome is unknown is not repeated, and the per-call deadline and downloads behave as documented. No configuration changes.

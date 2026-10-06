@@ -133,6 +133,7 @@ Returns session and closed: true.
 ## jev_decide
 
 Sends caller-provided state and typed questions directly to the configured Jev decision port. It does not create or change a browser session. The tool is registered only when the server has a decision port.
+For score questions, `score` is the 0-based index of the chosen level and probabilities are keyed by level index; when Jev rejects a request, the tool returns Jev's reason.
 
 | Input     | Type                      | Required | Meaning                                                                        |
 | --------- | ------------------------- | -------- | ------------------------------------------------------------------------------ |

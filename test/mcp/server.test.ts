@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { MockDecider } from "../../src/decision/mock.ts";
-import { DecisionTransportError } from "../../src/decision/errors.ts";
+import { DecisionTransportError, InvalidAnswerError } from "../../src/decision/errors.ts";
 import { sessionResultSchema } from "../../src/orchestrator/result.ts";
 import { BrowserConfigError } from "../../src/engine/default.ts";
 import { EngineRegistry } from "../../src/engine/registry.ts";
@@ -90,6 +90,172 @@ test("call deadline defaults to 45 seconds", async () => {
     assert.equal(code, 1);
     assert.match(stderr, /JEVPILOT_CALL_DEADLINE_MS must be between 0 and 2147483647\./u);
   });
+});
+
+test("score levels must be strings, objects or lists", async () => {
+  const deps = fakeMcpDeps();
+  let calls = 0;
+  deps.decisionPort = {
+    decide: async () => {
+      calls++;
+      return {
+        answers: {},
+        usage: { inputTokens: 0, outputTokens: 0 },
+        model: "m",
+        provider: "x",
+        latencyMs: 0,
+        attempts: 1,
+      };
+    },
+  };
+  const app = createServer(deps);
+  const client = new Client({ name: "mcp-unit", version: "1" });
+  const [left, right] = InMemoryTransport.createLinkedPair();
+  await app.server.connect(right);
+  await client.connect(left);
+  try {
+    await assert.rejects(
+      client.callTool({
+        name: "jev_decide",
+        arguments: {
+          state: {},
+          questions: { score: { type: "score", instructions: "x", criteria: [1, 2, 3] } },
+        },
+      }),
+      (error: unknown) => (error as { code?: number }).code === -32602,
+    );
+    assert.equal(calls, 0);
+    for (const criteria of [["low"], [{ level: "low" }], [["low"]]])
+      await client.callTool({
+        name: "jev_decide",
+        arguments: {
+          state: {},
+          questions: { score: { type: "score", instructions: "x", criteria } },
+        },
+      });
+  } finally {
+    await client.close();
+    await app.close();
+  }
+});
+
+test("jev_decide explains a rejected request", async () => {
+  const deps = fakeMcpDeps();
+  deps.decisionPort = {
+    decide: async () => {
+      throw new DecisionTransportError("failed", 422, false, {
+        providerMessage: "questions.relevance.score.criteria.0.str: Input should be a valid string",
+      });
+    },
+  };
+  const app = createServer(deps);
+  const client = new Client({ name: "mcp-unit", version: "1" });
+  const [left, right] = InMemoryTransport.createLinkedPair();
+  await app.server.connect(right);
+  await client.connect(left);
+  try {
+    const result = await client.callTool({
+      name: "jev_decide",
+      arguments: { state: {}, questions: {} },
+    });
+    assert.match(text(result), /HTTP 422/u);
+    assert.match(text(result), /criteria\.0\.str/u);
+  } finally {
+    await client.close();
+    await app.close();
+  }
+  for (const failure of [new DecisionTransportError("failed", 500, false), new Error("network")]) {
+    const genericDeps = fakeMcpDeps();
+    genericDeps.decisionPort = {
+      decide: async () => {
+        throw failure;
+      },
+    };
+    const genericApp = createServer(genericDeps);
+    const genericClient = new Client({ name: "mcp-unit", version: "1" });
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    await genericApp.server.connect(b);
+    await genericClient.connect(a);
+    try {
+      const generic = await genericClient.callTool({
+        name: "jev_decide",
+        arguments: { state: {}, questions: {} },
+      });
+      assert.match(text(generic), /Tool failed/u);
+    } finally {
+      await genericClient.close();
+      await genericApp.close();
+    }
+  }
+});
+
+test("jev_decide explains an answer that does not match the questions", async () => {
+  const deps = fakeMcpDeps();
+  deps.decisionPort = {
+    decide: async () => {
+      throw new InvalidAnswerError(["relevance: probability keys"]);
+    },
+  };
+  const app = createServer(deps);
+  const client = new Client({ name: "mcp-unit", version: "1" });
+  const [left, right] = InMemoryTransport.createLinkedPair();
+  await app.server.connect(right);
+  await client.connect(left);
+  try {
+    const result = await client.callTool({
+      name: "jev_decide",
+      arguments: { state: {}, questions: {} },
+    });
+    assert.match(text(result), /did not match the questions/u);
+    assert.match(text(result), /relevance: probability keys/u);
+  } finally {
+    await client.close();
+    await app.close();
+  }
+});
+
+test("jev_decide accepts mixed choice, score and noul questions", async () => {
+  const deps = fakeMcpDeps();
+  deps.decisionPort = {
+    decide: async () => ({
+      answers: {
+        choice: { type: "choice", choice: "yes", confidence: 1, probabilities: { yes: 1 } },
+        score: { type: "score", score: 1, confidence: 1, probabilities: { "0": 0, "1": 1 } },
+        flag: { type: "noul", noul: 0 },
+      },
+      usage: { inputTokens: 1, outputTokens: 1 },
+      model: "jev",
+      provider: "x",
+      latencyMs: 1,
+      attempts: 1,
+    }),
+  };
+  const app = createServer(deps);
+  const client = new Client({ name: "mcp-unit", version: "1" });
+  const [left, right] = InMemoryTransport.createLinkedPair();
+  await app.server.connect(right);
+  await client.connect(left);
+  try {
+    const result = await client.callTool({
+      name: "jev_decide",
+      arguments: {
+        state: {},
+        questions: {
+          choice: { type: "choice", instructions: "x", criteria: { yes: "yes" } },
+          score: { type: "score", instructions: "x", criteria: ["low", "high"] },
+          flag: { type: "noul", instructions: "x" },
+        },
+      },
+    });
+    assert.deepEqual(Object.keys(data(result).answers as object).sort(), [
+      "choice",
+      "flag",
+      "score",
+    ]);
+  } finally {
+    await client.close();
+    await app.close();
+  }
 });
 
 test("an invalid startup setting leaves no temp directory", async () => {

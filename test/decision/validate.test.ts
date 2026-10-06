@@ -5,6 +5,34 @@ import type { Answers, Question } from "../../src/index.ts";
 import { answers, request } from "./helpers.ts";
 
 describe("validateAnswers", () => {
+  test("score answers use level indexes as Jev returns them", () => {
+    const questions = {
+      relevance: {
+        type: "score" as const,
+        instructions: "Rate",
+        criteria: ["low", "high", "very high"],
+      },
+      object: {
+        type: "score" as const,
+        instructions: "Rate",
+        criteria: [{ level: "low" }, { level: "high" }],
+      },
+    };
+    validateAnswers(questions, {
+      relevance: { score: 2, confidence: 0.99, probabilities: { "0": 0, "1": 0, "2": 1 } },
+      object: { score: 1, confidence: 0.99, probabilities: { "0": 0, "1": 1 } },
+    });
+    assert.throws(
+      () =>
+        validateAnswers(
+          { relevance: questions.relevance },
+          {
+            relevance: { score: 2, confidence: 1, probabilities: { low: 0, high: 0, other: 1 } },
+          },
+        ),
+      InvalidAnswerError,
+    );
+  });
   const scoreQuestion: Question = {
     type: "score",
     instructions: "Rate",

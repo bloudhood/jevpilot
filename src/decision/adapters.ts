@@ -83,6 +83,26 @@ export function extractProviderError(raw: unknown): ProviderErrorDetail {
     };
   }
 
+  if (typeof envelope.detail === "string") return { providerMessage: envelope.detail };
+  if (Array.isArray(envelope.detail)) {
+    const messages: string[] = [];
+    for (const item of envelope.detail) {
+      const record = asRecord(item);
+      const message = asText(record?.msg);
+      if (!message) continue;
+      const location = Array.isArray(record?.loc)
+        ? record.loc
+            .slice(1)
+            .map((part) => String(part))
+            .join(".")
+        : "detail";
+      const formatted = `${location}: ${message}`;
+      if (!messages.includes(formatted)) messages.push(formatted);
+      if (messages.length === 3) break;
+    }
+    if (messages.length) return { providerMessage: messages.join("; ") };
+  }
+
   const nestedError = asRecord(envelope.error);
   const providerMessage =
     asText(nestedError?.message) ?? asText(envelope.error) ?? asText(envelope.message);

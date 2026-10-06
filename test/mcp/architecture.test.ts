@@ -41,6 +41,7 @@ test("M7a: tool modules import only allowed modules", async () => {
     /^\.\.\/\.\.\/orchestrator\/result\.ts$/u,
     /^\.\.\/\.\.\/engine\/types\.ts$/u,
     /^\.\.\/\.\.\/decision\/types\.ts$/u,
+    /^\.\.\/\.\.\/decision\/errors\.ts$/u,
     /^\.\/[A-Za-z0-9_-]+\.ts$/u,
   ];
   for (const entry of entries) {

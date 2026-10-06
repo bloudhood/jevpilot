@@ -56,7 +56,10 @@ export function validateAnswers(questions: Record<string, Question>, answers: An
         checkProbabilities(
           id,
           answer.probabilities,
-          question.criteria.map((level, index) => levelKey(level, index)),
+          [
+            question.criteria.map((_level, index) => String(index)),
+            question.criteria.map((level, index) => levelKey(level, index)),
+          ],
           problems,
         );
         checkConfidence(id, answer.confidence, problems);
@@ -147,12 +150,14 @@ function normalized(probabilities: Record<string, number>): Record<string, numbe
 function checkProbabilities(
   id: string,
   probabilities: Record<string, number>,
-  expectedKeys: string[],
+  expectedKeys: string[] | string[][],
   problems: string[],
 ): void {
   const actualKeys = Object.keys(probabilities).sort();
-  const sortedExpectedKeys = [...expectedKeys].sort();
-  if (actualKeys.join("\0") !== sortedExpectedKeys.join("\0")) {
+  const expectedSets = Array.isArray(expectedKeys[0])
+    ? (expectedKeys as string[][])
+    : [expectedKeys as string[]];
+  if (!expectedSets.some((keys) => actualKeys.join("\0") === [...keys].sort().join("\0"))) {
     problems.push(`${id}: probability keys`);
   }
   const values = Object.values(probabilities);

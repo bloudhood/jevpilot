@@ -13,7 +13,7 @@ export const questionSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("score"),
     instructions: instructionsSchema,
-    criteria: z.array(z.unknown()),
+    criteria: z.array(z.union([z.string(), z.record(z.unknown()), z.array(z.unknown())])),
   }),
   z.object({
     type: z.literal("noul"),
