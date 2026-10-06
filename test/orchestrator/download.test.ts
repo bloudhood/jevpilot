@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import fsPromises, { readFile, rm, symlink, writeFile } from "node:fs/promises";
+import fsPromises, { readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -232,7 +232,11 @@ test("concurrent downloads with the same name do not overwrite each other", asyn
     assert.notEqual(records[0]!.path, records[1]!.path);
     assert.deepEqual(
       new Set(records.map((entry) => entry.path)),
-      new Set([join(root, "12345678-2-report.csv"), join(root, "12345678-3-report.csv")]),
+      // Reported paths are canonical (e.g. a long name where TEMP is an 8.3 short path).
+      new Set([
+        join(await realpath(root), "12345678-2-report.csv"),
+        join(await realpath(root), "12345678-3-report.csv"),
+      ]),
     );
     assert.equal(await readFile(occupied, "utf8"), "existing");
     assert.deepEqual(await Promise.all(records.map((entry) => readFile(entry.path!, "utf8"))), [
@@ -297,7 +301,7 @@ test("a download moves by exclusive copy where hard links are unsupported", asyn
     const result = await session.observe();
     const record = result.downloads?.[0];
     assert.equal(record?.state, "completed");
-    assert.equal(record?.path, join(root, "no-links-2-report.csv"));
+    assert.equal(record?.path, join(await realpath(root), "no-links-2-report.csv"));
     assert.equal(await readFile(record!.path!, "utf8"), "payload");
     assert.equal(await readFile(occupied, "utf8"), "existing");
     await assert.rejects(readFile(source));
