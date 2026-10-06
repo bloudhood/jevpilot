@@ -8,7 +8,12 @@ import { createDecisionPort } from "../decision/port.ts";
 import { loadDecisionConfig, redactDecisionConfig } from "../decision/config.ts";
 import { createDefaultEngine } from "../engine/default.ts";
 import { McpUserError, startupDiagnostic } from "./errors.ts";
-import { loadMcpProfile, parseActionabilityTimeout, parseNavigationTimeout } from "./profile.ts";
+import {
+  loadMcpProfile,
+  parseActionabilityTimeout,
+  parseCallDeadline,
+  parseNavigationTimeout,
+} from "./profile.ts";
 import { installProcessSafety } from "./process-safety.ts";
 import { parseThresholds } from "./thresholds.ts";
 import { createServer } from "./server.ts";
@@ -73,13 +78,14 @@ async function main(): Promise<void> {
     const redacted = redactDecisionConfig(config);
     process.stderr.write(`jevpilot-mcp decision provider: ${String(redacted.provider)}\n`);
   }
-  const loaded = await loadMcpProfile(env);
-  const engines = createDefaultEngine(loaded.profile);
+  // Validate every setting before loadMcpProfile creates the browser's temp directory, so a bad
+  // value cannot leave that directory behind.
   const allowedDomains = env.JEVPILOT_ALLOWED_DOMAINS?.split(",")
     .map((value) => value.trim())
     .filter(Boolean);
   const navigationTimeoutMs = parseNavigationTimeout(env.JEVPILOT_NAVIGATION_TIMEOUT_MS);
   const actionabilityTimeoutMs = parseActionabilityTimeout(env.JEVPILOT_ACTIONABILITY_TIMEOUT_MS);
+  const callDeadlineMs = parseCallDeadline(env.JEVPILOT_CALL_DEADLINE_MS);
   const thresholds = parseThresholds(env.JEVPILOT_THRESHOLDS);
   const networkGuard = parseNetworkGuard(
     env.JEVPILOT_NETWORK_GUARD,
@@ -89,24 +95,32 @@ async function main(): Promise<void> {
   const imageResponses = parseImageResponses(env.JEVPILOT_IMAGE_RESPONSES);
   const screenshotDir = parseScreenshotDir(env.JEVPILOT_SCREENSHOT_DIR);
   const disabledTools = parseDisabledTools(env.JEVPILOT_DISABLED_TOOLS);
-  const app = createServer({
-    engines,
-    launchOptions: { networkGuard },
-    maxSessions,
-    isolatedSessions: env.JEVPILOT_ISOLATED_SESSIONS === "1",
-    usageDetail: env.JEVPILOT_USAGE_DETAIL === "1",
-    ...(decisionPort ? { decisionPort } : {}),
-    ...(decisionProvider ? { decisionProvider } : {}),
-    ...(decisionContextLimit !== undefined ? { decisionContextLimit } : {}),
-    ...(allowedDomains?.length ? { allowedDomains } : {}),
-    ...(navigationTimeoutMs ? { navigationTimeoutMs } : {}),
-    ...(actionabilityTimeoutMs ? { actionabilityTimeoutMs } : {}),
-    ...(thresholds ? { thresholds } : {}),
-    ...(env.JEVPILOT_DECISION_LOG ? { decisionLogPath: env.JEVPILOT_DECISION_LOG } : {}),
-    ...(imageResponses ? { imageResponses } : {}),
-    ...(screenshotDir ? { screenshotDir } : {}),
-    ...(disabledTools ? { disabledTools } : {}),
-  });
+  const loaded = await loadMcpProfile(env);
+  let app: ReturnType<typeof createServer>;
+  try {
+    app = createServer({
+      engines: createDefaultEngine(loaded.profile),
+      launchOptions: { networkGuard },
+      maxSessions,
+      isolatedSessions: env.JEVPILOT_ISOLATED_SESSIONS === "1",
+      usageDetail: env.JEVPILOT_USAGE_DETAIL === "1",
+      ...(decisionPort ? { decisionPort } : {}),
+      ...(decisionProvider ? { decisionProvider } : {}),
+      ...(decisionContextLimit !== undefined ? { decisionContextLimit } : {}),
+      ...(allowedDomains?.length ? { allowedDomains } : {}),
+      ...(navigationTimeoutMs ? { navigationTimeoutMs } : {}),
+      ...(actionabilityTimeoutMs ? { actionabilityTimeoutMs } : {}),
+      callDeadlineMs,
+      ...(thresholds ? { thresholds } : {}),
+      ...(env.JEVPILOT_DECISION_LOG ? { decisionLogPath: env.JEVPILOT_DECISION_LOG } : {}),
+      ...(imageResponses ? { imageResponses } : {}),
+      ...(screenshotDir ? { screenshotDir } : {}),
+      ...(disabledTools ? { disabledTools } : {}),
+    });
+  } catch (error) {
+    await loaded.cleanup();
+    throw error;
+  }
   let stopping: Promise<void> | undefined;
   let httpClose: (() => Promise<void>) | undefined;
   const stop = (): Promise<void> =>

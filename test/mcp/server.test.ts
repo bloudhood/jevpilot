@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { MockDecider } from "../../src/decision/mock.ts";
@@ -13,6 +15,7 @@ import { BrowserConfigError } from "../../src/engine/default.ts";
 import { EngineRegistry } from "../../src/engine/registry.ts";
 import { CdpTimeoutError } from "../../src/browser/errors.ts";
 import { createServer } from "../../src/mcp/server.ts";
+import { DEFAULT_CALL_DEADLINE_MS, parseCallDeadline } from "../../src/mcp/profile.ts";
 import { fakeMcpDeps, fakeObservation } from "../support/mcp-fixture.ts";
 import { FakePageHandle } from "../support/fake-engine.ts";
 import type { DecisionResult } from "../../src/decision/types.ts";
@@ -21,6 +24,574 @@ const data = (result: unknown): Record<string, unknown> =>
   (result as { structuredContent: Record<string, unknown> }).structuredContent;
 const text = (result: unknown): string =>
   (result as { content: { text: string }[] }).content[0]!.text;
+
+const mainEntry = fileURLToPath(new URL("../../src/mcp/main.ts", import.meta.url));
+
+// Runs fn with an environment whose temp directory is a fresh one, removed afterwards.
+async function withIsolatedTemp(
+  fn: (env: NodeJS.ProcessEnv, temp: string) => Promise<void>,
+): Promise<void> {
+  const temp = await mkdtemp(join(tmpdir(), "jevpilot-main-test-"));
+  try {
+    await fn(
+      { ...process.env, JEVPILOT_SKIP_BROWSER: "1", TEMP: temp, TMP: temp, TMPDIR: temp },
+      temp,
+    );
+  } finally {
+    await rm(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+}
+
+function startMain(env: NodeJS.ProcessEnv): Promise<{ code: number | null; stderr: string }> {
+  const child = spawn(process.execPath, [mainEntry], { env, stdio: ["ignore", "ignore", "pipe"] });
+  let stderr = "";
+  child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
+  return new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", (code) => resolve({ code, stderr }));
+  });
+}
+
+test("call deadline defaults to 45 seconds", async () => {
+  assert.equal(DEFAULT_CALL_DEADLINE_MS, 45_000);
+  assert.equal(parseCallDeadline(undefined), DEFAULT_CALL_DEADLINE_MS);
+  assert.equal(parseCallDeadline("0"), 0);
+  assert.equal(parseCallDeadline("1500"), 1500);
+  for (const invalid of ["abc", "-1", "2147483648"])
+    assert.throws(() => parseCallDeadline(invalid), {
+      message: "JEVPILOT_CALL_DEADLINE_MS must be between 0 and 2147483647.",
+    });
+
+  await withIsolatedTemp(async (env) => {
+    delete env.JEVPILOT_CALL_DEADLINE_MS;
+    const running = spawn(process.execPath, [mainEntry], {
+      env,
+      stdio: ["pipe", "ignore", "pipe"],
+    });
+    let runningStderr = "";
+    running.stderr.on("data", (chunk: Buffer) => (runningStderr += chunk.toString()));
+    const exited = new Promise<number | null>((resolve) => running.once("exit", resolve));
+    try {
+      const exit = await Promise.race([
+        exited,
+        new Promise<"alive">((resolve) => setTimeout(() => resolve("alive"), 500)),
+      ]);
+      assert.equal(exit, "alive", runningStderr);
+    } finally {
+      // Closing stdin shuts the server down cleanly; kill is only a fallback.
+      running.stdin.end();
+      const fallback = setTimeout(() => running.kill(), 5000);
+      await exited;
+      clearTimeout(fallback);
+    }
+
+    const { code, stderr } = await startMain({ ...env, JEVPILOT_CALL_DEADLINE_MS: "abc" });
+    assert.equal(code, 1);
+    assert.match(stderr, /JEVPILOT_CALL_DEADLINE_MS must be between 0 and 2147483647\./u);
+  });
+});
+
+test("an invalid startup setting leaves no temp directory", async () => {
+  await withIsolatedTemp(async (env, temp) => {
+    const { code, stderr } = await startMain({ ...env, JEVPILOT_CALL_DEADLINE_MS: "abc" });
+    assert.equal(code, 1, stderr);
+    assert.deepEqual(
+      (await readdir(temp)).filter((name) => name.startsWith("jevpilot-mcp-browser-")),
+      [],
+    );
+  });
+});
+
+test("deadline yield retains session and resumes", async () => {
+  const deps = fakeMcpDeps();
+  let now = 0;
+  let actions = 0;
+  deps.clock = () => now;
+  deps.callDeadlineMs = 50;
+  deps.orchestrator!.sleep = async (ms) => {
+    now += ms;
+  };
+  deps.orchestrator!.observe = async () =>
+    fakeObservation(actions ? `changed-${actions}` : "start");
+  deps.orchestrator!.pageMatches = async () => actions === 2;
+  deps.orchestrator!.interpret = () => ({
+    type: "act",
+    action: { kind: "scroll", direction: "down" },
+  });
+  deps.decisionPort = {
+    decide: async () => {
+      now += 10;
+      return {
+        answers: {},
+        usage: { inputTokens: 2, outputTokens: 1 },
+        provider: "mock",
+        model: "mock",
+        attempts: 1,
+        latencyMs: 10,
+      };
+    },
+  };
+  deps.orchestrator!.executeAction = async (_page, _observation, _action, _values, options) => {
+    assert.equal(options?.waitTimeoutMs, 40);
+    assert.equal(options?.actionabilityTimeoutMs, 40);
+    actions++;
+    now += 40;
+    return {
+      outcome: "changed",
+      changes: { url: false, pageHash: true, value: false, checked: false },
+      timings: { precheckMs: 0, inputMs: 1, settleMs: 39, harnessMs: 0 },
+    };
+  };
+  const app = createServer(deps);
+  const client = new Client({ name: "deadline", version: "1" });
+  const [left, right] = InMemoryTransport.createLinkedPair();
+  await app.server.connect(right);
+  await client.connect(left);
+  try {
+    const first = data(
+      await client.callTool({
+        name: "browser_run",
+        arguments: { goal: "Finish", success: { text_present: "Finished" } },
+      }),
+    );
+    assert.equal(first.status, "BUDGET_EXHAUSTED");
+    assert.equal(first.reason, "call_deadline_exceeded");
+    assert.equal(actions, 1);
+    assert.equal(
+      data(
+        await client.callTool({ name: "browser_observe", arguments: { session: first.session } }),
+      ).status,
+      "RUNNING",
+    );
+    const resumed = data(
+      await client.callTool({ name: "browser_resume", arguments: { session: first.session } }),
+    );
+    assert.equal(resumed.status, "DONE_VERIFIED");
+    assert.equal(actions, 2);
+    assert.equal(resumed.session, first.session);
+  } finally {
+    await client.close();
+    await app.close();
+  }
+});
+
+test("deadline abort is not client cancellation", async () => {
+  for (const cancelClient of [false, true]) {
+    const deps = fakeMcpDeps();
+    let now = 0;
+    deps.clock = () => now;
+    deps.callDeadlineMs = cancelClient ? 1000 : 5;
+    let internalSignal!: AbortSignal;
+    let notify!: () => void;
+    const started = new Promise<void>((resolve) => {
+      notify = resolve;
+    });
+    let notifyClosed!: () => void;
+    const closed = new Promise<void>((resolve) => {
+      notifyClosed = resolve;
+    });
+    deps.decisionPort = {
+      decide: async (_r, options) => {
+        internalSignal = options!.signal!;
+        deps.pages[0]!.close = async () => {
+          notifyClosed();
+        };
+        notify();
+        return new Promise<DecisionResult>((_resolve, reject) =>
+          internalSignal.addEventListener(
+            "abort",
+            () => {
+              now += 5;
+              reject(new Error("aborted"));
+            },
+            { once: true },
+          ),
+        );
+      },
+    };
+    const app = createServer(deps);
+    const client = new Client({ name: "deadline-cancel", version: "1" });
+    const [left, right] = InMemoryTransport.createLinkedPair();
+    await app.server.connect(right);
+    await client.connect(left);
+    const controller = new AbortController();
+    try {
+      const pending = client.callTool(
+        { name: "browser_run", arguments: { goal: "Finish" } },
+        undefined,
+        { signal: controller.signal },
+      );
+      if (cancelClient) {
+        const rejected = assert.rejects(pending, /client cancelled/u);
+        await started;
+        controller.abort(new Error("client cancelled"));
+        await rejected;
+        await closed;
+      } else {
+        await started;
+        const result = data(await pending);
+        assert.equal(result.status, "BUDGET_EXHAUSTED");
+        assert.equal(result.reason, "call_deadline_exceeded");
+        assert.equal(controller.signal.aborted, false);
+        assert.notEqual(internalSignal, controller.signal);
+        assert.equal(
+          data(
+            await client.callTool({
+              name: "browser_observe",
+              arguments: { session: result.session },
+            }),
+          ).status,
+          "RUNNING",
+        );
+      }
+      assert.equal(internalSignal.aborted, true);
+    } finally {
+      await client.close();
+      await app.close();
+    }
+  }
+});
+
+test("deadline zero preserves the long-call path", async () => {
+  for (const deadline of [undefined, 0]) {
+    const deps = fakeMcpDeps();
+    let now = 0;
+    deps.clock = () => now;
+    if (deadline !== undefined) deps.callDeadlineMs = deadline;
+    deps.orchestrator!.sleep = async (ms) => {
+      now += ms;
+    };
+    deps.decisionPort = {
+      decide: async () => {
+        now += 70_000;
+        return {
+          answers: {},
+          usage: { inputTokens: 2, outputTokens: 1 },
+          provider: "mock",
+          model: "mock",
+          attempts: 1,
+          latencyMs: 0,
+        };
+      },
+    };
+    deps.orchestrator!.interpret = () => ({
+      type: "act",
+      action: { kind: "scroll", direction: "down" },
+    });
+    const app = createServer(deps);
+    const client = new Client({ name: "deadline-zero", version: "1" });
+    const [left, right] = InMemoryTransport.createLinkedPair();
+    await app.server.connect(right);
+    await client.connect(left);
+    try {
+      const result = data(
+        await client.callTool({
+          name: "browser_run",
+          arguments: { goal: "Finish", budget: { seconds: 180 } },
+        }),
+      );
+      assert.equal(result.reason, "budget_exhausted");
+      assert.ok(now >= 180_000);
+      assert.equal((result.trace as unknown[]).length, 2);
+    } finally {
+      await client.close();
+      await app.close();
+    }
+  }
+});
+
+test("pre-session time counts against the deadline", async () => {
+  const deps = fakeMcpDeps();
+  let now = 0;
+  let actions = 0;
+  deps.clock = () => now;
+  deps.callDeadlineMs = 50;
+  deps.orchestrator!.sleep = async (ms) => {
+    now += ms;
+  };
+  deps.decisionPort = {
+    decide: async () => {
+      now += 15;
+      return {
+        answers: {},
+        usage: { inputTokens: 2, outputTokens: 1 },
+        provider: "mock",
+        model: "mock",
+        attempts: 1,
+        latencyMs: 0,
+      };
+    },
+  };
+  deps.orchestrator!.interpret = () => ({
+    type: "act",
+    action: { kind: "scroll", direction: "down" },
+  });
+  deps.orchestrator!.executeAction = async () => {
+    actions++;
+    now += 50;
+    return {
+      outcome: "changed",
+      changes: { url: false, pageHash: true, value: false, checked: false },
+      timings: { precheckMs: 0, inputMs: 0, settleMs: 0, harnessMs: 0 },
+    };
+  };
+  const navigate = FakePageHandle.prototype.navigate;
+  FakePageHandle.prototype.navigate = async function (url, options) {
+    now += 40;
+    return navigate.call(this, url, options);
+  };
+  const app = createServer(deps);
+  const client = new Client({ name: "deadline-navigation", version: "1" });
+  const [left, right] = InMemoryTransport.createLinkedPair();
+  await app.server.connect(right);
+  await client.connect(left);
+  try {
+    const result = data(
+      await client.callTool({
+        name: "browser_run",
+        arguments: { goal: "Finish", url: "http://fixture.test" },
+      }),
+    );
+    assert.equal(result.reason, "call_deadline_exceeded");
+    assert.equal(actions, 0, "15ms decision cannot fit in the 10ms remaining after navigation");
+    assert.equal(
+      data(
+        await client.callTool({ name: "browser_observe", arguments: { session: result.session } }),
+      ).status,
+      "RUNNING",
+    );
+  } finally {
+    FakePageHandle.prototype.navigate = navigate;
+    await client.close();
+    await app.close();
+  }
+});
+
+test("initial navigation consumes call deadline", async () => {
+  const deps = fakeMcpDeps();
+  let now = 0;
+  deps.clock = () => now;
+  deps.callDeadlineMs = 20;
+  const original = FakePageHandle.prototype.navigate;
+  let received = 0;
+  FakePageHandle.prototype.navigate = async function (url, options) {
+    received = options?.timeoutMs ?? 0;
+    now += received;
+    return { url, headers: {}, failure: "timeout" };
+  };
+  const app = createServer(deps);
+  const client = new Client({ name: "nav-deadline", version: "1" });
+  const [left, right] = InMemoryTransport.createLinkedPair();
+  await app.server.connect(right);
+  await client.connect(left);
+  try {
+    const result = data(
+      await client.callTool({
+        name: "browser_run",
+        arguments: { goal: "Finish", url: "http://fixture.test" },
+      }),
+    );
+    assert.equal(result.reason, "call_deadline_exceeded");
+    assert.ok(received <= 20);
+    assert.equal(deps.pages.length, 1);
+    const resumed = data(
+      await client.callTool({ name: "browser_resume", arguments: { session: result.session } }),
+    );
+    assert.ok(resumed.status);
+  } finally {
+    FakePageHandle.prototype.navigate = original;
+    await client.close();
+    await app.close();
+  }
+});
+
+test("slow navigation after click yields without repeating click", async () => {
+  const deps = fakeMcpDeps();
+  let now = 0;
+  deps.clock = () => now;
+  deps.callDeadlineMs = 10;
+  deps.orchestrator!.pageMatches = async () => actions >= 1;
+  let actions = 0;
+  deps.orchestrator!.executeAction = async (_p, _o, _a, _v, options) => {
+    actions++;
+    assert.ok((options?.navigationTimeoutMs ?? 0) <= 10);
+    now += 10;
+    return {
+      outcome: "changed",
+      changes: { url: false, pageHash: true, value: false, checked: false },
+      timings: { precheckMs: 0, inputMs: 0, settleMs: 10, waitMs: 10, harnessMs: 0 },
+    };
+  };
+  deps.orchestrator!.interpret = () => ({
+    type: "act",
+    action: { kind: "scroll", direction: "down" },
+  });
+  const app = createServer(deps);
+  const client = new Client({ name: "click-deadline", version: "1" });
+  const [left, right] = InMemoryTransport.createLinkedPair();
+  await app.server.connect(right);
+  await client.connect(left);
+  try {
+    const first = data(
+      await client.callTool({
+        name: "browser_run",
+        arguments: { goal: "Finish", success: { text_present: "Finished" } },
+      }),
+    );
+    assert.equal(first.reason, "call_deadline_exceeded");
+    const second = data(
+      await client.callTool({ name: "browser_resume", arguments: { session: first.session } }),
+    );
+    assert.equal(actions, 1);
+    assert.equal(second.status, "DONE_VERIFIED");
+  } finally {
+    await client.close();
+    await app.close();
+  }
+});
+
+test("cold-start timeout leaves no orphan page", async () => {
+  const deps = fakeMcpDeps();
+  let now = 0;
+  deps.clock = () => now;
+  deps.callDeadlineMs = 5;
+  let release!: () => void;
+  deps.launchGate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const app = createServer(deps);
+  const client = new Client({ name: "cold", version: "1" });
+  const [left, right] = InMemoryTransport.createLinkedPair();
+  await app.server.connect(right);
+  await client.connect(left);
+  try {
+    const result = await client.callTool({ name: "browser_run", arguments: { goal: "Finish" } });
+    assert.equal(result.isError, true);
+    assert.equal(text(result), "The browser is still starting; call browser_run again.");
+    release();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(deps.pages.length, 0);
+  } finally {
+    await client.close();
+    await app.close();
+  }
+});
+
+test("one timed-out caller does not cancel shared launch", async () => {
+  const deps = fakeMcpDeps();
+  let release!: () => void;
+  deps.launchGate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  deps.callDeadlineMs = 5;
+  const app = createServer(deps);
+  const client = new Client({ name: "shared", version: "1" });
+  const [left, right] = InMemoryTransport.createLinkedPair();
+  await app.server.connect(right);
+  await client.connect(left);
+  try {
+    const first = client.callTool({ name: "browser_run", arguments: { goal: "Finish" } });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    release();
+    const firstResult = await first;
+    assert.equal(firstResult.isError, true);
+    const second = data(
+      await client.callTool({
+        name: "browser_run",
+        arguments: { goal: "Finish", success: { text_present: "Finished" } },
+      }),
+    );
+    assert.ok(second.session);
+    assert.equal(deps.launches(), 1);
+  } finally {
+    await client.close();
+    await app.close();
+  }
+});
+
+test("unknown input outcome is not auto-retried", async () => {
+  const deps = fakeMcpDeps();
+  let actions = 0;
+  deps.orchestrator!.executeAction = async () => {
+    actions++;
+    throw new CdpTimeoutError("input timed out");
+  };
+  let decisions = 0;
+  deps.orchestrator!.interpret = () =>
+    ++decisions === 1
+      ? {
+          type: "act",
+          action: { kind: "scroll", direction: "down" },
+        }
+      : { type: "handoff", reason: "uncertain", source: "code", details: {} };
+  const app = createServer(deps);
+  const client = new Client({ name: "unknown-input", version: "1" });
+  const [left, right] = InMemoryTransport.createLinkedPair();
+  await app.server.connect(right);
+  await client.connect(left);
+  try {
+    const result = data(
+      await client.callTool({
+        name: "browser_run",
+        arguments: { goal: "Finish", success: { text_present: "Finished" } },
+      }),
+    );
+    assert.equal(actions, 1);
+    assert.ok(!String(result.status).startsWith("DONE_"));
+  } finally {
+    await client.close();
+    await app.close();
+  }
+});
+
+test("long workflow finishes across resumes", async () => {
+  const deps = fakeMcpDeps();
+  let now = 0;
+  deps.clock = () => now;
+  deps.callDeadlineMs = 5;
+  let actions = 0;
+  deps.orchestrator!.pageMatches = async () => actions >= 3;
+  deps.orchestrator!.observe = async () =>
+    fakeObservation(actions >= 3 ? "Finished" : `step-${actions}`);
+  deps.orchestrator!.executeAction = async () => {
+    actions++;
+    now += 5;
+    return {
+      outcome: "changed",
+      changes: { url: false, pageHash: true, value: false, checked: false },
+      timings: { precheckMs: 0, inputMs: 0, settleMs: 5, waitMs: 5, harnessMs: 0 },
+    };
+  };
+  deps.orchestrator!.interpret = () => ({
+    type: "act",
+    action: { kind: "scroll", direction: "down" },
+  });
+  const app = createServer(deps);
+  const client = new Client({ name: "workflow", version: "1" });
+  const [left, right] = InMemoryTransport.createLinkedPair();
+  await app.server.connect(right);
+  await client.connect(left);
+  try {
+    const first = data(
+      await client.callTool({
+        name: "browser_run",
+        arguments: { goal: "Finish", success: { text_present: "Finished" } },
+      }),
+    );
+    let result = first;
+    for (let count = 0; count < 10 && result.status !== "DONE_VERIFIED"; count++) {
+      assert.equal(result.reason, "call_deadline_exceeded");
+      result = data(
+        await client.callTool({ name: "browser_resume", arguments: { session: result.session } }),
+      );
+    }
+    assert.equal(result.status, "DONE_VERIFIED");
+    assert.equal(actions, 3);
+  } finally {
+    await client.close();
+    await app.close();
+  }
+});
 
 async function cancelledDecision(resume: boolean) {
   const deps = fakeMcpDeps();

@@ -82,6 +82,7 @@ export type Observation = {
   pageHash: string;
   timings: {
     snapshotMs: number;
+    mainFrameMs?: number;
     settleMs?: number;
     totalMs: number;
     framesSkipped?: number;
@@ -99,6 +100,7 @@ export type SnapshotOptions = {
   markerSelectors?: string[];
 };
 export type ObserveOptions = {
+  maxWaitMs?: number;
   settleNavigation?: boolean;
   goal?: string;
   maxElements?: number;

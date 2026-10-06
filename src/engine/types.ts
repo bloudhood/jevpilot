@@ -161,6 +161,7 @@ export interface BrowserHandle {
   readonly capabilities: Capabilities;
   readonly selfCheck: SelfCheckReport | undefined;
   readonly connected: boolean;
+  readonly downloadPath?: string | undefined;
   onDisconnected(listener: () => void): () => void;
   newPage(options?: { isolated?: { copyCookies: boolean } }): Promise<PageHandle>;
   pages(): PageHandle[];

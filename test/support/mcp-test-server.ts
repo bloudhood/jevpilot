@@ -16,6 +16,11 @@ const deps = real
           driver: "cdp",
           profile: {
             ...testProfile(process.env.JEVPILOT_USER_DATA_DIR ?? "", { width: 1000, height: 700 }),
+            // This server builds its profile itself, so loadMcpProfile's JEVPILOT_DOWNLOAD_DIR
+            // handling (unit-tested) does not run; apply the same effect here.
+            ...(process.env.JEVPILOT_DOWNLOAD_DIR
+              ? { downloadPath: process.env.JEVPILOT_DOWNLOAD_DIR }
+              : {}),
             executable: process.env.JEVPILOT_BROWSER_PATH,
             extraArgs: [
               ...(testProfile("").extraArgs ?? []),

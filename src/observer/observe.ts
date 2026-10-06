@@ -203,11 +203,13 @@ export async function observe(
   options: ObserveOptions = {},
 ): Promise<Observation> {
   const started = performance.now();
+  const maxWait =
+    options.maxWaitMs === undefined ? Number.POSITIVE_INFINITY : Math.max(1, options.maxWaitMs);
   const settleMs = await page.callIsolated(
     waitForNavigationQuiet,
     [options.settleNavigation === true],
     {
-      timeoutMs: 3200,
+      timeoutMs: Math.min(3200, maxWait),
     },
   );
   const snapshotStarted = performance.now();
@@ -222,12 +224,13 @@ export async function observe(
       ...(options.markerSelectors ? { markerSelectors: options.markerSelectors } : {}),
     },
   ]);
+  const mainFrameMs = performance.now() - snapshotStarted;
   let framesSkipped = 0;
   let framesFailed = 0;
   let framesMs: number | undefined;
   let childFramesMs: number | undefined;
   if (page.capabilities.crossOriginFrames) {
-    const budget = Math.max(1, options.frameTimeoutMs ?? 1000);
+    const budget = Math.max(1, Math.min(options.frameTimeoutMs ?? 1000, maxWait));
     const framesStarted = performance.now();
     const frames = await page.frames({ timeoutMs: budget, skipAdFrames: true });
     framesSkipped += frames.framesSkipped ?? 0;
@@ -374,6 +377,7 @@ export async function observe(
     elements,
     timings: {
       snapshotMs,
+      mainFrameMs,
       settleMs,
       totalMs: performance.now() - started,
       ...(framesSkipped ? { framesSkipped } : {}),

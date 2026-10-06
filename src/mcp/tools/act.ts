@@ -11,6 +11,12 @@ const tool: ToolModule = {
     host.registerTool(
       "browser_act",
       {
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: true,
+        },
         description:
           "Perform manual browser operations against current element refs in an existing session. Returns a fresh snapshot, so a separate browser_observe is not needed after it. The orchestrator rechecks targets and applies the same domain and irreversible-action gates.",
         inputSchema: {

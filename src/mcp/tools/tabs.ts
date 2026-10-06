@@ -10,6 +10,12 @@ const tool: ToolModule = {
     host.registerTool(
       "browser_tabs",
       {
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: true,
+        },
         description: "List, select, or close tabs owned by a browser session.",
         inputSchema: {
           session: nonempty.describe("Session ID returned by browser_run."),

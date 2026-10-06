@@ -1659,6 +1659,9 @@ export function createCdpDriver(deps: LaunchDeps & { lookup?: AddressLookup } = 
         get connected() {
           return browser.connected;
         },
+        get downloadPath() {
+          return browser.downloadPath;
+        },
         onDisconnected: (listener) => browser.onDisconnected(listener),
         newPage: async (pageOptions) => {
           const session = await browser.newPage(pageOptions);

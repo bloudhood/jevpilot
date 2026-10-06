@@ -72,10 +72,14 @@
               },
               "required": ["role", "name"],
               "additionalProperties": false
+            },
+            "download_completed": {
+              "type": "boolean",
+              "const": true
             }
           },
           "additionalProperties": false,
-          "description": "Optional checks that are false now and become true only when the goal is done, e.g. url_matches for the result page. Checks that already hold on the start page are ignored."
+          "description": "Optional checks that are false now and become true only when the goal is done, e.g. url_matches for the result page. Checks that already hold on the start page are ignored. download_completed: true holds once a download started in this session has been verified complete."
         },
         "constraints": {
           "type": "object",
@@ -222,6 +226,33 @@
         "screenshot_path": {
           "type": "string"
         },
+        "downloads": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string",
+                "enum": ["in_progress", "completed", "canceled", "unavailable"]
+              },
+              "path": {
+                "type": "string"
+              },
+              "size_bytes": {
+                "type": "number"
+              }
+            },
+            "required": ["id", "name", "state"],
+            "additionalProperties": false
+          },
+          "maxItems": 20
+        },
         "trace": {
           "type": "array",
           "items": {
@@ -457,6 +488,12 @@
       ],
       "additionalProperties": false,
       "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": true
     },
     "execution": {
       "taskSupport": "forbidden"
@@ -581,6 +618,33 @@
         "screenshot_path": {
           "type": "string"
         },
+        "downloads": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string",
+                "enum": ["in_progress", "completed", "canceled", "unavailable"]
+              },
+              "path": {
+                "type": "string"
+              },
+              "size_bytes": {
+                "type": "number"
+              }
+            },
+            "required": ["id", "name", "state"],
+            "additionalProperties": false
+          },
+          "maxItems": 20
+        },
         "trace": {
           "type": "array",
           "items": {
@@ -817,13 +881,19 @@
       "additionalProperties": false,
       "$schema": "http://json-schema.org/draft-07/schema#"
     },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": true
+    },
     "execution": {
       "taskSupport": "forbidden"
     }
   },
   {
     "name": "browser_observe",
-    "description": "Read the current page in an existing session without taking action. Use full detail when the compact snapshot omits needed content. A screenshot path may be returned for handoffs when safe.",
+    "description": "Read the current page in an existing session without acting on it. Use full detail when the compact snapshot omits needed content. screenshot=true also saves a JPEG of the visible viewport, when the engine supports it, and returns its path; a handoff result may carry a screenshot path as well. These files are temporary, deleted when the session closes, and never written in sessions that use secret values. To look at the page yourself, use browser_screenshot. If the page has stopped responding, it may reopen the same URL once in a new isolated tab, which discards unsaved page state.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -893,6 +963,33 @@
         "screenshot_path": {
           "type": "string"
         },
+        "downloads": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string",
+                "enum": ["in_progress", "completed", "canceled", "unavailable"]
+              },
+              "path": {
+                "type": "string"
+              },
+              "size_bytes": {
+                "type": "number"
+              }
+            },
+            "required": ["id", "name", "state"],
+            "additionalProperties": false
+          },
+          "maxItems": 20
+        },
         "trace": {
           "type": "array",
           "items": {
@@ -1129,6 +1226,12 @@
       "additionalProperties": false,
       "$schema": "http://json-schema.org/draft-07/schema#"
     },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": true
+    },
     "execution": {
       "taskSupport": "forbidden"
     }
@@ -1164,6 +1267,12 @@
       "required": ["session"],
       "additionalProperties": false,
       "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": true
     },
     "execution": {
       "taskSupport": "forbidden"
@@ -1323,6 +1432,33 @@
         "screenshot_path": {
           "type": "string"
         },
+        "downloads": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string",
+                "enum": ["in_progress", "completed", "canceled", "unavailable"]
+              },
+              "path": {
+                "type": "string"
+              },
+              "size_bytes": {
+                "type": "number"
+              }
+            },
+            "required": ["id", "name", "state"],
+            "additionalProperties": false
+          },
+          "maxItems": 20
+        },
         "trace": {
           "type": "array",
           "items": {
@@ -1558,6 +1694,12 @@
       ],
       "additionalProperties": false,
       "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": true
     },
     "execution": {
       "taskSupport": "forbidden"
@@ -1632,6 +1774,33 @@
         "screenshot_path": {
           "type": "string"
         },
+        "downloads": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string",
+                "enum": ["in_progress", "completed", "canceled", "unavailable"]
+              },
+              "path": {
+                "type": "string"
+              },
+              "size_bytes": {
+                "type": "number"
+              }
+            },
+            "required": ["id", "name", "state"],
+            "additionalProperties": false
+          },
+          "maxItems": 20
+        },
         "trace": {
           "type": "array",
           "items": {
@@ -1868,6 +2037,12 @@
       "additionalProperties": false,
       "$schema": "http://json-schema.org/draft-07/schema#"
     },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": true
+    },
     "execution": {
       "taskSupport": "forbidden"
     }
@@ -1935,6 +2110,12 @@
       "additionalProperties": false,
       "$schema": "http://json-schema.org/draft-07/schema#"
     },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": true
+    },
     "execution": {
       "taskSupport": "forbidden"
     }
@@ -1969,6 +2150,12 @@
       "required": ["session", "closed"],
       "additionalProperties": false,
       "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": true
     },
     "execution": {
       "taskSupport": "forbidden"
@@ -2106,6 +2293,12 @@
       "required": ["answers", "usage", "model", "latency_ms"],
       "additionalProperties": false,
       "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
     },
     "execution": {
       "taskSupport": "forbidden"

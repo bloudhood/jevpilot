@@ -1,6 +1,6 @@
 {
   "name": "jevpilot",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Fast Jev browser MCP server: Jev (TypeSafe System One) drives a real Chrome step by step for AI agents and hands back early when unsure.",
   "keywords": [
     "jev",
@@ -16,6 +16,18 @@
     "cdp"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bloudhood/jevpilot.git"
+  },
+  "homepage": "https://github.com/bloudhood/jevpilot#readme",
+  "bugs": {
+    "url": "https://github.com/bloudhood/jevpilot/issues"
+  },
+  "author": "bloudhood",
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "bin": {
     "jevpilot-mcp": "./dist/mcp/main.js"

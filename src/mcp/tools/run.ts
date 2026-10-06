@@ -17,8 +17,14 @@ const buildSession = async (
   signal: AbortSignal,
   page: PageHandle,
   active: BrowserHandle,
+  deadlineAt?: number,
 ): Promise<OrchestratorSession> => {
   let initialBlockedRequest: PageEvents["requestBlocked"] | undefined;
+  const initialDownloads: PageEvents["download"][] = [];
+  const initialDownloadHandler = (event: PageEvents["download"]): void => {
+    initialDownloads.push(event);
+  };
+  page.on("download", initialDownloadHandler);
   page.on("requestBlocked", (event) => {
     if (event.frame === "main") initialBlockedRequest = event;
   });
@@ -61,29 +67,47 @@ const buildSession = async (
   }
   const navigationTimeoutMs =
     input.navigation_timeout_ms ?? host.deps.navigationTimeoutMs ?? 30_000;
+  const navigationWaitMs = (): number =>
+    deadlineAt === undefined
+      ? navigationTimeoutMs
+      : Math.max(
+          1,
+          Math.min(navigationTimeoutMs, deadlineAt - (host.deps.clock?.() ?? Date.now())),
+        );
   const navigationStarted = performance.now();
   const navigation = input.url
     ? await abortableNavigation(
-        page.navigate(input.url, { timeoutMs: navigationTimeoutMs }),
+        page.navigate(input.url, { timeoutMs: navigationWaitMs() }),
         signal,
         active,
       ).catch((error: unknown) => ({
         url: input.url!,
         headers: {},
         failure:
-          error instanceof Error && error.name === "CdpTimeoutError"
-            ? "timeout"
-            : error instanceof Error && error.name === "CdpDisconnectedError"
-              ? "disconnected"
-              : error instanceof Error && error.name === "CdpProtocolError"
-                ? "protocol"
-                : "navigation_error",
+          deadlineAt !== undefined && (host.deps.clock?.() ?? Date.now()) >= deadlineAt
+            ? "call_deadline_exceeded"
+            : error instanceof Error && error.name === "CdpTimeoutError"
+              ? "timeout"
+              : error instanceof Error && error.name === "CdpDisconnectedError"
+                ? "disconnected"
+                : error instanceof Error && error.name === "CdpProtocolError"
+                  ? "protocol"
+                  : "navigation_error",
       }))
     : undefined;
+  if (
+    navigation &&
+    navigation.failure === "timeout" &&
+    deadlineAt !== undefined &&
+    (host.deps.clock?.() ?? Date.now()) >= deadlineAt
+  )
+    navigation.failure = "call_deadline_exceeded";
   const navigationMs = navigation ? performance.now() - navigationStarted : undefined;
-  return new OrchestratorSession(
+  const session = new OrchestratorSession(
     {
       page,
+      initialDownloads,
+      ...(active.downloadPath ? { downloadPath: active.downloadPath } : {}),
       automaticIsolatedFallback: !host.deps.isolatedSessions,
       ...(active.capabilities.isolatedContexts
         ? {
@@ -126,6 +150,7 @@ const buildSession = async (
               ...(input.success.element_present
                 ? { element_present: input.success.element_present }
                 : {}),
+              ...(input.success.download_completed ? { download_completed: true as const } : {}),
             },
           }
         : {}),
@@ -155,6 +180,8 @@ const buildSession = async (
         : {}),
     },
   );
+  page.off("download", initialDownloadHandler);
+  return session;
 };
 
 const tool: ToolModule = {
@@ -163,6 +190,12 @@ const tool: ToolModule = {
     host.registerTool(
       "browser_run",
       {
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: true,
+        },
         description:
           "Open a new browser session and work toward a goal. Jev acts fast on its own and hands back early with a question when unsure; continue with browser_act / browser_resume from the returned snapshot. Returns a session ID and a status; handoff statuses include a concrete question for the agent or user. Reuse the session with browser_resume, browser_observe, browser_act, and browser_close.",
         inputSchema: runInput,
@@ -172,11 +205,18 @@ const tool: ToolModule = {
         !host.hasDecisionPort()
           ? Promise.resolve(host.result(host.noDecisionPortResult()))
           : host.handle("browser_run", async () => {
+              const startedAt = host.deps.clock?.() ?? Date.now();
+              const deadlineAt =
+                host.deps.callDeadlineMs && host.deps.callDeadlineMs > 0
+                  ? startedAt + host.deps.callDeadlineMs
+                  : undefined;
               if (input.url) requireHttpUrl(input.url);
               const outcome = await host.runNewSession({
                 ...(input.profile !== undefined ? { profile: input.profile } : {}),
                 signal: extra.signal,
-                build: (page, active) => buildSession(host, input, extra.signal, page, active),
+                ...(deadlineAt !== undefined ? { deadlineAt } : {}),
+                build: (page, active) =>
+                  buildSession(host, input, extra.signal, page, active, deadlineAt),
               });
               if (outcome === "full")
                 return {

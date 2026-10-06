@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -11,6 +11,82 @@ import { sessionResultSchema } from "../../../src/orchestrator/result.ts";
 import { TestStdioTransport } from "../../support/mcp-stdio.ts";
 
 const browserPath = process.env.JEVPILOT_SKIP_BROWSER === "1" ? undefined : await findChrome();
+
+test(
+  "browser_act download is delivered with a readable name",
+  { skip: browserPath ? undefined : "Chrome unavailable or JEVPILOT_SKIP_BROWSER=1" },
+  async () => {
+    const site = createServer((_request, response) => {
+      if (_request.url === "/file") {
+        response.setHeader("content-disposition", 'attachment; filename="report.csv"');
+        response.end("a,b\n1,2\n");
+        return;
+      }
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      response.end('<a id="download" href="/file">Export CSV</a>');
+    });
+    await new Promise<void>((resolve) => site.listen(0, "127.0.0.1", resolve));
+    const address = site.address();
+    if (!address || typeof address === "string") throw new Error("fixture site has no port");
+    const directory = await mkdtemp(join(tmpdir(), "jevpilot-m8c-integration-"));
+    const downloadDir = join(directory, "downloads");
+    await mkdir(downloadDir);
+    const transport = new TestStdioTransport({
+      ...process.env,
+      JEVPILOT_TEST_REAL: "1",
+      JEVPILOT_BROWSER_PATH: browserPath!,
+      JEVPILOT_USER_DATA_DIR: join(directory, "profile"),
+      JEVPILOT_DOWNLOAD_DIR: downloadDir,
+    });
+    const client = new Client({ name: "m8c-download-integration", version: "1" });
+    try {
+      await client.connect(transport);
+      const run = await client.callTool({
+        name: "browser_run",
+        // One step per call: the scripted test decider clicks the link once and hands back instead
+        // of retrying until the client times out; browser_act then gets its own step.
+        arguments: {
+          goal: "Export CSV",
+          url: `http://127.0.0.1:${address.port}/`,
+          budget: { steps: 1 },
+        },
+      });
+      const session = String((run.structuredContent as Record<string, unknown>).session);
+      const observed = await client.callTool({ name: "browser_observe", arguments: { session } });
+      const snapshot = String((observed.structuredContent as Record<string, unknown>).snapshot);
+      const ref = snapshot.match(/^(e\d+)\s+link\s+"Export CSV"/mu)?.[1] ?? "e1";
+      const actStarted = performance.now();
+      await client.callTool({
+        name: "browser_act",
+        arguments: { session, ops: [{ action: "click", ref }] },
+      });
+      assert.ok(performance.now() - actStarted < 10_000);
+      const deadline = Date.now() + 10_000;
+      type DownloadEntry = { name: string; state: string; path?: string; size_bytes?: number };
+      let entry: DownloadEntry | undefined;
+      while (Date.now() < deadline) {
+        const result = await client.callTool({ name: "browser_observe", arguments: { session } });
+        entry = (
+          (result.structuredContent as Record<string, unknown>).downloads as
+            DownloadEntry[] | undefined
+        )?.find((item) => item.state === "completed");
+        if (entry) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      assert.equal(entry?.name, "report.csv");
+      assert.match(entry?.path ?? "", /-report\.csv$/u);
+      assert.equal(entry?.size_bytes, 8);
+      assert.equal(await readFile(entry!.path!, "utf8"), "a,b\n1,2\n");
+      assert.equal(entry!.path!.startsWith(downloadDir), true);
+      await client.callTool({ name: "browser_close", arguments: { session } });
+    } finally {
+      await client.close();
+      await transport.exited();
+      await new Promise<void>((resolve) => site.close(() => resolve()));
+      await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    }
+  },
+);
 
 test(
   "MCP real Chrome run to handoff to resume to verified done",

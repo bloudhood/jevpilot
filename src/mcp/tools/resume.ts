@@ -10,6 +10,12 @@ const tool: ToolModule = {
     host.registerTool(
       "browser_resume",
       {
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: true,
+        },
         description:
           "Continue an existing session after a handoff. Supply missing values, refine the goal, or approve one pending irreversible action; approval is scoped to that action.",
         inputSchema: {
@@ -24,6 +30,11 @@ const tool: ToolModule = {
       },
       (input, extra) =>
         host.handle("browser_resume", () => {
+          const startedAt = host.deps.clock?.() ?? Date.now();
+          const deadlineAt =
+            host.deps.callDeadlineMs && host.deps.callDeadlineMs > 0
+              ? startedAt + host.deps.callDeadlineMs
+              : undefined;
           if (
             host.deps.allowedDomains?.length &&
             input.allowed_domains?.some(
@@ -55,7 +66,7 @@ const tool: ToolModule = {
                     }
                   : {}),
               },
-              { signal: extra.signal },
+              { signal: extra.signal, ...(deadlineAt !== undefined ? { deadlineAt } : {}) },
             ),
           );
         }),

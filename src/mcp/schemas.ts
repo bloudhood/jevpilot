@@ -55,10 +55,11 @@ const runInput = {
       url_matches: z.string().optional(),
       text_present: z.string().optional(),
       element_present: z.object({ role: nonempty, name: nonempty }).optional(),
+      download_completed: z.literal(true).optional(),
     })
     .optional()
     .describe(
-      "Optional checks that are false now and become true only when the goal is done, e.g. url_matches for the result page. Checks that already hold on the start page are ignored.",
+      "Optional checks that are false now and become true only when the goal is done, e.g. url_matches for the result page. Checks that already hold on the start page are ignored. download_completed: true holds once a download started in this session has been verified complete.",
     ),
   constraints: z
     .object({

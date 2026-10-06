@@ -48,7 +48,7 @@ jevpilot 不是 TypeSafe 官方项目。Jev 是 TypeSafe 的付费模型，需�
 
 ## 快速开始
 
-每个版本在 [GitHub Releases](https://github.com/bloudhood/jevpilot/releases) 提供安装包 `jevpilot-X.Y.Z.tgz` 和 `SHA256SUMS.txt`。把它加到 MCP 客户端里，密钥放在环境变量中，不要写进配置文件。
+从 npm 安装，加到 MCP 客户端里。密钥放在环境变量中，不要写进配置文件。
 
 Claude Code（`.mcp.json`）：
 
@@ -60,7 +60,7 @@ Claude Code（`.mcp.json`）：
       "args": [
         "-y",
         "--package",
-        "https://github.com/bloudhood/jevpilot/releases/download/v0.3.1/jevpilot-0.3.1.tgz",
+        "jevpilot@0.4.0",
         "jevpilot-mcp"
       ],
       "env": { "JEV_PROVIDER": "openrouter", "JEV_API_KEY": "${JEV_API_KEY}" }
@@ -74,12 +74,14 @@ Codex（`config.toml`）：
 ```toml
 [mcp_servers.jevpilot]
 command = "npx"
-args = ["-y", "--package", "https://github.com/bloudhood/jevpilot/releases/download/v0.3.1/jevpilot-0.3.1.tgz", "jevpilot-mcp"]
+args = ["-y", "--package", "jevpilot@0.4.0", "jevpilot-mcp"]
 env = { JEV_PROVIDER = "openrouter" }
 env_vars = ["JEV_API_KEY"]
 ```
 
 使用 TypeSafe 密钥时设 `JEV_PROVIDER=typesafe`。在原生 Windows 上，Claude Code 需要写成 `"command": "cmd"`、`"args": ["/c", "npx", ...]`。用 `jevpilot-mcp doctor` 检查配置（同一条 `npx` 命令，末尾加 `doctor`）。
+
+同一个安装包也附在每个 [GitHub release](https://github.com/bloudhood/jevpilot/releases) 上，文件名 `jevpilot-X.Y.Z.tgz`，附带 `SHA256SUMS.txt`。要从它安装，把 `jevpilot@0.4.0` 换成 `https://github.com/bloudhood/jevpilot/releases/download/v0.4.0/jevpilot-0.4.0.tgz`。
 
 ## 工具
 

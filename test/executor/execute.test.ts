@@ -252,6 +252,64 @@ test("M6r: executor timings report the post-action resolve and observe time", as
   assert.ok(navigated.timings.observeMs !== undefined && navigated.timings.observeMs >= 20);
 });
 
+test("a click that starts a download does not wait for navigation", async () => {
+  class DownloadPage extends FakePageHandle {
+    override async click(x: number, y: number) {
+      const input = await super.click(x, y);
+      this.emit("navigationRequested", { url: "https://fixture.test/file" });
+      this.emit("download", {
+        id: "download-guid",
+        url: "https://signed.example/file",
+        suggestedFilename: "file.csv",
+        state: "started",
+      });
+      return input;
+    }
+  }
+  const downloadPage = new DownloadPage(
+    { status: "ok", visible: true, enabled: true },
+    observation,
+  );
+  const started = performance.now();
+  await executeAction(
+    downloadPage,
+    observation,
+    { kind: "click", target },
+    {},
+    {
+      navigationTimeoutMs: 30_000,
+    },
+  );
+  assert.ok(performance.now() - started < 1000);
+
+  class RealNavigationPage extends FakePageHandle {
+    override async click(x: number, y: number) {
+      const input = await super.click(x, y);
+      this.emit("navigationRequested", { url: "https://fixture.test/next" });
+      setTimeout(() => {
+        this.emit("navigated", { url: "https://fixture.test/next" });
+        this.emit("domContentLoaded", { url: "https://fixture.test/next" });
+      }, 50);
+      return input;
+    }
+  }
+  const navigationPage = new RealNavigationPage(
+    { status: "ok", visible: true, enabled: true },
+    observation,
+  );
+  const navigationStarted = performance.now();
+  await executeAction(
+    navigationPage,
+    observation,
+    { kind: "click", target },
+    {},
+    {
+      navigationTimeoutMs: 30_000,
+    },
+  );
+  assert.ok(performance.now() - navigationStarted >= 40);
+});
+
 test("M6s-3: observation and trace carry frames and child-frame timings", async () => {
   const page = new FakePageHandle(undefined, observation);
   page.frames = async () => {

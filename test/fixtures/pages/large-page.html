@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>星河群岛志</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 60px 24px 24px;
+        font-family: sans-serif;
+      }
+      .fixed-header {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 40px;
+        background: white;
+        border-bottom: 1px solid gray;
+        z-index: 2;
+      }
+      nav a,
+      footer a {
+        margin-right: 12px;
+      }
+      nav[aria-label="目录"] li {
+        line-height: 28px;
+      }
+      .infobox {
+        float: right;
+        width: 260px;
+      }
+      table {
+        border-collapse: collapse;
+        margin: 16px 0;
+      }
+      td,
+      th {
+        border: 1px solid gray;
+        padding: 4px;
+      }
+      .edit {
+        font-size: 14px;
+        margin-left: 12px;
+      }
+      iframe {
+        position: fixed;
+        right: 12px;
+        bottom: 12px;
+        width: 280px;
+        height: 120px;
+        background: white;
+        z-index: 3;
+      }
+      img {
+        width: 24px;
+        height: 24px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="fixed-header"><a href="#article">星河百科</a></div>
+    <header id="header"></header>
+    <main id="article">
+      <h1>星河群岛志 <a class="edit" href="#edit-title">编辑</a></h1>
+      <p>这是一篇虚构的群岛词条，记录云桥、风铃与潮汐的故事。</p>
+    </main>
+    <footer id="footer"></footer>
+    <script>
+      const params = new URLSearchParams(location.search);
+      const requestedScale = Number(params.get("scale") ?? 1);
+      const scale =
+        Number.isInteger(requestedScale) && requestedScale >= 1 && requestedScale <= 8
+          ? requestedScale
+          : 1;
+      const article = document.querySelector("#article");
+      const link = (text, href) => `<a href="${href}">${text}</a>`;
+      document.querySelector("#header").innerHTML =
+        `<nav aria-label="站点导航">${Array.from({ length: 40 }, (_, i) => link(`导航 ${i + 1}`, `#navigation-${i + 1}`)).join(" ")}</nav>` +
+        '<form><label for="search">搜索</label><input id="search" name="search"><button type="submit">搜索</button></form>';
+      const infobox = `<table class="infobox"><caption>群岛概要</caption><tbody>${Array.from({ length: 40 }, (_, i) => `<tr><th>项目 ${i + 1}</th><td>云帆记录 ${i + 1}</td></tr>`).join("")}</tbody></table>`;
+      const toc = `<nav aria-label="目录"><h2>目录</h2><ol>${Array.from({ length: 80 }, (_, i) => `<li>${link(`篇章 ${i + 1}`, `#section-${(i % (60 * scale)) + 1}`)}</li>`).join("")}</ol></nav>`;
+      let content = infobox + toc;
+      for (let section = 1; section <= 60 * scale; section++) {
+        content += `<section id="section-${section}"><h2>群岛篇章 ${section}${link("编辑", `#edit-${section}`)}</h2>`;
+        if (section % 3 === 0)
+          content += `<h3>支流札记 ${section}${link("编辑", `#edit-sub-${section}`)}</h3>`;
+        for (let paragraph = 0; paragraph < 3 + (section % 4); paragraph++) {
+          content += `<p>晨雾沿着纸船码头缓缓散开，星河居民把风声记入蓝色册页。${Array.from({ length: 10 }, (_, i) => `<span>关于${link(`云桥传说 ${section}-${paragraph}-${i}`, `#story-${section}-${paragraph}-${i}`)}的虚构记载，潮汐花园留下清亮回声。</span>`).join("")}</p>`;
+        }
+        content += "</section>";
+      }
+      for (let table = 1; table <= 20 * scale; table++) {
+        content += `<table class="data-table"><caption>观测记录 ${table}</caption><tbody>`;
+        for (let row = 1; row <= 30; row++) {
+          content += `<tr>${Array.from({ length: 6 }, (_, column) => `<td><span>记录 ${table}-${row}-${column + 1}</span> <span>${column % 2 === 0 ? link("潮声资料", `#data-${table}-${row}-${column}`) : "银叶标记"}</span></td>`).join("")}</tr>`;
+        }
+        content += "</tbody></table>";
+      }
+      content += `<div class="gallery">${Array.from({ length: 150 }, (_, i) => `<img alt="虚构群岛图示 ${i + 1}" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">`).join("")}</div>`;
+      content += `<ol class="references">${Array.from({ length: 400 * scale }, (_, i) => `<li>${link("↑", `#citation-${i + 1}`)}${link(`参考资料 ${i + 1}`, `https://example.invalid/reference/${i + 1}`)}</li>`).join("")}</ol>`;
+      for (let box = 1; box <= 15 * scale; box++) {
+        const open = box <= 2;
+        content += `<aside class="navbox"><h2>关联条目 ${box}</h2><button type="button" class="navbox-toggle" aria-expanded="${open}" aria-controls="navbox-${box}">${open ? "折叠" : "展开"}</button><ul id="navbox-${box}" style="display:${open ? "block" : "none"}">${Array.from({ length: 150 }, (_, i) => `<li>${link(`星河条目 ${box}-${i + 1}`, `#related-${box}-${i + 1}`)}</li>`).join("")}</ul></aside>`;
+      }
+      article.insertAdjacentHTML("beforeend", content);
+      for (const button of document.querySelectorAll(".navbox-toggle")) {
+        button.addEventListener("click", () => {
+          const open = button.getAttribute("aria-expanded") !== "true";
+          button.setAttribute("aria-expanded", String(open));
+          button.textContent = open ? "折叠" : "展开";
+          document.getElementById(button.getAttribute("aria-controls")).style.display = open
+            ? "block"
+            : "none";
+        });
+      }
+      document.querySelector("#footer").innerHTML = Array.from({ length: 50 }, (_, i) =>
+        link(`页尾链接 ${i + 1}`, `#footer-${i + 1}`),
+      ).join(" ");
+      const frameUrl = params.get("frame");
+      if (frameUrl) {
+        const frame = document.createElement("iframe");
+        frame.title = "词条辅助表单";
+        frame.src = frameUrl;
+        document.body.append(frame);
+      }
+    </script>
+  </body>
+</html>

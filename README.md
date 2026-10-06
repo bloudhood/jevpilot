@@ -48,7 +48,7 @@ Set `JEVPILOT_DISPLAY=headed` to use a headed browser (off-screen on Windows, Xv
 
 ## Quick start
 
-Each release on [GitHub Releases](https://github.com/bloudhood/jevpilot/releases) ships the package `jevpilot-X.Y.Z.tgz` and `SHA256SUMS.txt`. Add it to your MCP client and keep the key in your environment rather than in the file.
+Install from npm and add it to your MCP client. Keep the key in your environment rather than in the file.
 
 Claude Code (`.mcp.json`):
 
@@ -60,7 +60,7 @@ Claude Code (`.mcp.json`):
       "args": [
         "-y",
         "--package",
-        "https://github.com/bloudhood/jevpilot/releases/download/v0.3.1/jevpilot-0.3.1.tgz",
+        "jevpilot@0.4.0",
         "jevpilot-mcp"
       ],
       "env": { "JEV_PROVIDER": "openrouter", "JEV_API_KEY": "${JEV_API_KEY}" }
@@ -74,12 +74,14 @@ Codex (`config.toml`):
 ```toml
 [mcp_servers.jevpilot]
 command = "npx"
-args = ["-y", "--package", "https://github.com/bloudhood/jevpilot/releases/download/v0.3.1/jevpilot-0.3.1.tgz", "jevpilot-mcp"]
+args = ["-y", "--package", "jevpilot@0.4.0", "jevpilot-mcp"]
 env = { JEV_PROVIDER = "openrouter" }
 env_vars = ["JEV_API_KEY"]
 ```
 
 Use `JEV_PROVIDER=typesafe` for a TypeSafe key. On native Windows, Claude Code needs `"command": "cmd"` with `"args": ["/c", "npx", ...]`. Check the setup with `jevpilot-mcp doctor` (the same `npx` command with `doctor` at the end).
+
+The same package is attached to each [GitHub release](https://github.com/bloudhood/jevpilot/releases) as `jevpilot-X.Y.Z.tgz` with `SHA256SUMS.txt`; to install from it, replace `jevpilot@0.4.0` with `https://github.com/bloudhood/jevpilot/releases/download/v0.4.0/jevpilot-0.4.0.tgz`.
 
 ## Tools
 

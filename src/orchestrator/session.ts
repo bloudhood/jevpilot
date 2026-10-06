@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { lstat, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { createOwnedTempDir } from "../util/owned-temp.ts";
+import { sanitizeDownloadName } from "../util/download.ts";
 import { createDecisionPort } from "../decision/port.ts";
 import { appendCalibrationRecord, calibrationRequestRecord } from "./decision-log.ts";
 import { redactSecret } from "./redact.ts";
@@ -62,6 +63,8 @@ import {
 export type SecretValue = { secret_ref: string; origins: string[] };
 export type SessionValue = string | SecretValue;
 
+type CallApproval = { available: boolean };
+
 function checkTypedFieldsInPage(
   fields: readonly {
     epoch: number;
@@ -98,6 +101,7 @@ export type SuccessAssertions = {
   url_matches?: string;
   text_present?: string;
   element_present?: { role: string; name: string };
+  download_completed?: true;
 };
 export type { SessionResult, SessionStatus, SessionTrace } from "./result.ts";
 export type SessionOptions = {
@@ -124,6 +128,8 @@ export type SessionOptions = {
   idleTimeoutMs?: number;
   autoPassWindowMs?: number;
   id?: string;
+  downloadPath?: string;
+  initialDownloads?: PageEvents["download"][];
 };
 export type ManualOp = {
   action: Action["kind"] | "dialog" | "hover" | "drag" | "upload" | "wait_for" | "press_key";
@@ -376,6 +382,7 @@ export class OrchestratorSession {
   private steps = 0;
   private invocationSteps = 0;
   private invocationStarted: number;
+  private invocationDeadlineAt: number | undefined;
   private decisionTokens = 0;
   private callDecisions = 0;
   private callInputTokens = 0;
@@ -405,6 +412,18 @@ export class OrchestratorSession {
   private pendingPopup: { page: PageEvents["popup"]; arrivedAt: number } | undefined;
   private lastExecutedActionAt: number | undefined;
   private downloads: PageEvents["download"][] = [];
+  private readonly downloadRecords = new Map<
+    string,
+    {
+      id: string;
+      name: string;
+      state: "in_progress" | "completed" | "canceled" | "unavailable";
+      path?: string;
+      size_bytes?: number;
+      pendingVerification?: boolean;
+    }
+  >();
+  private readonly downloadPath: string | undefined;
   private queuedSample?: { observation: Observation; findings: Finding[] };
   private navigationVersion = 0;
   private sampleVersion = -1;
@@ -432,6 +451,8 @@ export class OrchestratorSession {
   private successAssertionsIgnoredWhen = "on the start page";
   private carriedBrowserMs = 0;
   private staleRecoveryDeadline = 0;
+  // Set by resume() around executing the approved pending action; execute() clears it at dispatch.
+  private dispatchingPending = false;
   private pageUnresponsive = false;
   private manualOpsInProgress = false;
   private automaticReopenAttempted = false;
@@ -448,6 +469,11 @@ export class OrchestratorSession {
     this.acceptanceHints = options.acceptanceHints ?? [];
     this.values = { ...options.values };
     this.success = options.success;
+    this.downloadPath = options.downloadPath;
+    for (const download of options.initialDownloads ?? []) {
+      this.downloads.push(download);
+      this.recordDownload(download);
+    }
     this.constraints = {
       ...options.constraints,
       allow_irreversible: options.constraints?.allow_irreversible ?? false,
@@ -523,7 +549,81 @@ export class OrchestratorSession {
   }
   private onDownload = (download: PageEvents["download"]): void => {
     this.downloads.push(download);
+    this.recordDownload(download);
   };
+  private recordDownload(download: PageEvents["download"]): void {
+    const current = this.downloadRecords.get(download.id);
+    this.downloadRecords.set(download.id, {
+      id: download.id,
+      // Scrubbed before the rename too, so neither the file on disk nor its reported path carries a secret.
+      name: this.scrub(sanitizeDownloadName(download.suggestedFilename)),
+      state: download.state === "canceled" ? "canceled" : "in_progress",
+      ...(current?.path ? { path: current.path } : {}),
+      ...(current?.size_bytes !== undefined ? { size_bytes: current.size_bytes } : {}),
+      ...(download.path ? { path: download.path } : {}),
+      ...(download.state === "completed" ? { pendingVerification: true } : {}),
+    });
+    if (download.state === "canceled") {
+      const canceled = this.downloadRecords.get(download.id)!;
+      delete canceled.path;
+      delete canceled.size_bytes;
+      delete canceled.pendingVerification;
+    }
+    while (this.downloadRecords.size > 100)
+      this.downloadRecords.delete(this.downloadRecords.keys().next().value!);
+  }
+  private async materializeDownloads(): Promise<SessionResult["downloads"]> {
+    for (const record of this.downloadRecords.values()) {
+      if (!record.pendingVerification) continue;
+      if (!record.path || !this.downloadPath) {
+        record.state = "unavailable";
+        delete record.path;
+        delete record.pendingVerification;
+        continue;
+      }
+      try {
+        const root = await realpath(this.downloadPath);
+        const reported = await realpath(record.path);
+        if (reported !== root && !reported.startsWith(`${root}${sep}`))
+          throw new Error("download path escape");
+        const info = await lstat(record.path);
+        if (!info.isFile() || info.isSymbolicLink())
+          throw new Error("download is not a regular file");
+        const size = (await stat(record.path)).size;
+        const target = join(root, `${record.id.slice(0, 8)}-${record.name}`);
+        try {
+          await lstat(target);
+          record.state = "completed";
+          record.size_bytes = size;
+          delete record.pendingVerification;
+          continue;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+        try {
+          await rename(record.path, target);
+          record.path = target;
+        } catch {
+          /* keep GUID path */
+        }
+        record.state = "completed";
+        record.size_bytes = size;
+        delete record.pendingVerification;
+      } catch {
+        record.state = "unavailable";
+        delete record.path;
+        delete record.size_bytes;
+        delete record.pendingVerification;
+      }
+    }
+    return [...this.downloadRecords.values()].slice(-20).map((record) => ({
+      id: record.id,
+      name: this.scrub(record.name),
+      state: record.state,
+      ...(record.path ? { path: record.path } : {}),
+      ...(record.size_bytes !== undefined ? { size_bytes: record.size_bytes } : {}),
+    }));
+  }
   private onNavigated = (event: PageEvents["navigated"]): void => {
     this.navigationVersion++;
     this.navigation = {
@@ -538,7 +638,7 @@ export class OrchestratorSession {
   private touch(): void {
     this.updatedAt = this.deps.now();
   }
-  private beginInvocation(): void {
+  private beginInvocation(deadlineAt?: number): void {
     if (this.usageDetail && this.hasInvocation) {
       this.sessionDecideMs += this.decideMs;
       this.sessionBrowserMs += this.browserMs;
@@ -552,6 +652,7 @@ export class OrchestratorSession {
     delete this.lastResultAt;
     this.touch();
     this.invocationStarted = this.deps.now();
+    this.invocationDeadlineAt = deadlineAt;
     this.hasInvocation = true;
     this.invocationSteps = 0;
     this.callDecisions = 0;
@@ -624,6 +725,8 @@ export class OrchestratorSession {
         .filter((item) => item.inViewport && item.required && !item.value)
         .map((item) => `${item.role} ${JSON.stringify(this.scrub(item.name))}`) ?? [];
     switch (reason) {
+      case "call_deadline_exceeded":
+        return "The call reached its time limit before the goal was done; call browser_resume with this session to continue.";
       case "needs_values":
         if (details.secretSource)
           return "Use a JEVPILOT_SECRET_ environment variable or a file inside JEVPILOT_SECRETS_DIR for this secret.";
@@ -797,7 +900,10 @@ export class OrchestratorSession {
       },
       usage,
     };
-    if (status !== "RUNNING" && !this.decisionLogFinalized) {
+    const downloads = await this.materializeDownloads();
+    if (downloads?.length) result.downloads = downloads;
+    const deadlineYield = reason === "call_deadline_exceeded";
+    if (status !== "RUNNING" && !deadlineYield && !this.decisionLogFinalized) {
       this.decisionLogFinalized = true;
       const assertionsHeld = status === "DONE_VERIFIED";
       await appendCalibrationRecord(this.decisionLogPath, {
@@ -808,6 +914,7 @@ export class OrchestratorSession {
       });
     }
     if (
+      !deadlineYield &&
       status !== "BLOCKED_BY_POLICY" &&
       !(["RUNNING", "DONE_VERIFIED", "DONE_UNVERIFIED"] as SessionStatus[]).includes(status) &&
       !this.pageUnresponsive &&
@@ -933,8 +1040,43 @@ export class OrchestratorSession {
     return (
       this.invocationSteps >= this.budget.steps ||
       this.deps.now() - this.invocationStarted >= this.budget.seconds * 1000 ||
-      this.decisionTokens >= this.budget.decision_tokens
+      this.decisionTokens >= this.budget.decision_tokens ||
+      this.deadlineExceeded()
     );
+  }
+  private deadlineExceeded(): boolean {
+    return (
+      this.invocationDeadlineAt !== undefined &&
+      this.deps.now() >= this.invocationDeadlineAt &&
+      this.invocationDeadlineAt < this.invocationStarted + this.budget.seconds * 1000 &&
+      this.invocationSteps < this.budget.steps &&
+      this.decisionTokens < this.budget.decision_tokens
+    );
+  }
+  private remainingInvocationMs(): number {
+    const budgetRemaining = this.budget.seconds * 1000 - (this.deps.now() - this.invocationStarted);
+    const deadlineRemaining =
+      this.invocationDeadlineAt === undefined
+        ? Number.POSITIVE_INFINITY
+        : this.invocationDeadlineAt - this.deps.now();
+    return Math.min(budgetRemaining, deadlineRemaining);
+  }
+  private cappedTimeout(timeoutMs: number): number {
+    const remaining = this.remainingInvocationMs();
+    return this.invocationDeadlineAt === undefined
+      ? timeoutMs
+      : Math.max(1, Math.min(timeoutMs, remaining));
+  }
+  private deadlineResult(): Promise<SessionResult> {
+    return this.result("BUDGET_EXHAUSTED", "call_deadline_exceeded");
+  }
+  private async budgetResult(): Promise<SessionResult> {
+    if (this.deadlineExceeded()) {
+      if (this.lastObservation && (await this.verified(this.lastObservation)))
+        return this.result("DONE_VERIFIED", "success_assertions_met");
+      return this.deadlineResult();
+    }
+    return this.result("BUDGET_EXHAUSTED", "budget_exhausted");
   }
   private checkCancellation(): void {
     if (this.invocationSignal?.aborted) throw new SessionCancelledError("request cancelled");
@@ -958,9 +1100,17 @@ export class OrchestratorSession {
   }
   private async decideWithinBudget(request: DecisionRequest): Promise<DecisionResult> {
     this.checkCancellation();
-    const remaining = this.budget.seconds * 1000 - (this.deps.now() - this.invocationStarted);
-    if (remaining <= 0) throw new DecisionAbortedError("session budget exhausted");
+    const remaining = this.remainingInvocationMs();
+    if (remaining <= 0)
+      throw new DecisionAbortedError(
+        this.deadlineExceeded() ? "call deadline exceeded" : "session budget exhausted",
+      );
     const controller = new AbortController();
+    const timeoutReason =
+      this.invocationDeadlineAt !== undefined &&
+      this.invocationDeadlineAt < this.invocationStarted + this.budget.seconds * 1000
+        ? "call deadline exceeded"
+        : "session budget exhausted";
     const abort = (): void => controller.abort();
     this.invocationSignal?.addEventListener("abort", abort, { once: true });
     const timeout = setTimeout(() => controller.abort(), remaining);
@@ -970,7 +1120,7 @@ export class OrchestratorSession {
       return result;
     } catch (error) {
       this.checkCancellation();
-      if (controller.signal.aborted) throw new DecisionAbortedError("session budget exhausted");
+      if (controller.signal.aborted) throw new DecisionAbortedError(timeoutReason);
       throw error;
     } finally {
       clearTimeout(timeout);
@@ -990,6 +1140,7 @@ export class OrchestratorSession {
         goal: this.goal,
         markerSelectors: detectorMarkerSelectors(),
         settleNavigation: this.sampleVersion !== version,
+        ...(this.invocationDeadlineAt !== undefined ? { maxWaitMs: this.cappedTimeout(3200) } : {}),
         ...options,
       });
     } catch (error) {
@@ -999,6 +1150,7 @@ export class OrchestratorSession {
         goal: this.goal,
         markerSelectors: detectorMarkerSelectors(),
         settleNavigation: true,
+        ...(this.invocationDeadlineAt !== undefined ? { maxWaitMs: this.cappedTimeout(3200) } : {}),
         ...options,
       });
     }
@@ -1047,6 +1199,7 @@ export class OrchestratorSession {
       if (this.success && Object.keys(this.success).length) {
         try {
           this.successAssertionsIgnored =
+            !this.success.download_completed &&
             (!this.success.url_matches ||
               new RegExp(this.success.url_matches).test(observation.url)) &&
             ((!this.success.text_present && !this.success.element_present) ||
@@ -1118,7 +1271,8 @@ export class OrchestratorSession {
   private async waitForDocumentCommit(version: number): Promise<void> {
     // A replaced document normally commits within a second or two; without a navigation event (for
     // example a swapped iframe) waiting longer only delays the handoff.
-    this.staleRecoveryDeadline ||= this.deps.now() + Math.min(this.navigationTimeoutMs, 5000);
+    this.staleRecoveryDeadline ||=
+      this.deps.now() + this.cappedTimeout(Math.min(this.navigationTimeoutMs, 5000));
     const deadline = this.staleRecoveryDeadline;
     while (this.navigationVersion === version && this.deps.now() < deadline)
       await this.deps.sleep(Math.min(50, deadline - this.deps.now()));
@@ -1148,7 +1302,9 @@ export class OrchestratorSession {
     const replacement = await this.openIsolatedPage(true);
     try {
       this.checkCancellation();
-      const navigation = await replacement.navigate(url, { timeoutMs: this.navigationTimeoutMs });
+      const navigation = await replacement.navigate(url, {
+        timeoutMs: this.cappedTimeout(this.navigationTimeoutMs),
+      });
       if (navigation.failure && navigation.failure !== "timeout")
         throw new Error(`isolated navigation failed: ${navigation.failure}`);
       await replacement.callIsolated(() => true, [], { timeoutMs: 2000 });
@@ -1292,6 +1448,8 @@ export class OrchestratorSession {
     // An HTTP error document (a 429 rate limit, a 404) is never evidence of completion, even when
     // its URL matches the assertion.
     if ((this.navigation?.status ?? 0) >= 400) return false;
+    const downloadRequired = this.success.download_completed === true;
+    await this.materializeDownloads();
     for (let retry = 0; retry < 3; retry++) {
       const current =
         this.sampleVersion === this.navigationVersion
@@ -1300,22 +1458,31 @@ export class OrchestratorSession {
       const version = this.navigationVersion;
       let matched = false;
       try {
+        const pageMatched =
+          (!this.success.text_present && !this.success.element_present) ||
+          (await this.deps.pageMatches(
+            this.page,
+            this.success,
+            this.typedTexts.filter((entry) => entry.url === current.url).map((entry) => entry.text),
+          ));
         matched =
           !this.nonEvidencePages.has(current) &&
           (!this.success.url_matches || new RegExp(this.success.url_matches).test(current.url)) &&
-          ((!this.success.text_present && !this.success.element_present) ||
-            (await this.deps.pageMatches(
-              this.page,
-              this.success,
-              this.typedTexts
-                .filter((entry) => entry.url === current.url)
-                .map((entry) => entry.text),
-            )));
+          pageMatched &&
+          (!downloadRequired ||
+            [...this.downloadRecords.values()].some((entry) => entry.state === "completed"));
       } catch (error) {
         if (error instanceof PageUnresponsiveError) throw error;
         matched = false;
       }
-      if (version === this.navigationVersion) return matched;
+      if (version === this.navigationVersion) {
+        if (
+          downloadRequired &&
+          ![...this.downloadRecords.values()].some((entry) => entry.state === "completed")
+        )
+          return false;
+        return matched;
+      }
     }
     return false;
   }
@@ -1481,6 +1648,7 @@ export class OrchestratorSession {
     batchStep?: number,
     retriedStale = false,
     manual = false,
+    callApproval?: CallApproval,
   ): Promise<SessionResult | undefined> {
     if (!manual) this.checkCancellation();
     if (this.switchPendingPopup()) {
@@ -1647,6 +1815,11 @@ export class OrchestratorSession {
             ? irreversibleActionMatch(element)
             : undefined
           : element && irreversibleActionMatch(element);
+    // Claim only when the gate matches, and bind approval to this logical op's retries.
+    if (matched && !this.constraints.allow_irreversible && !approved && callApproval?.available) {
+      callApproval.available = false;
+      approved = true;
+    }
     if (matched && !this.constraints.allow_irreversible && !approved) {
       this.pendingGatedAction = {
         action,
@@ -1669,6 +1842,7 @@ export class OrchestratorSession {
     }
     const values = await this.valueFor(action);
     if ("status" in values) return values as SessionResult;
+    if (!manual && this.deadlineExceeded()) return this.deadlineResult();
     if (action.kind === "type" && element && expectedDateFormat(element.inputType ?? "")) {
       const supplied = action.text ?? (action.valueKey ? values[action.valueKey] : undefined);
       if (!normalizeDateLike(element.inputType!, supplied ?? ""))
@@ -1678,23 +1852,24 @@ export class OrchestratorSession {
     }
     const started = this.deps.now();
     const actionVersion = this.navigationVersion;
+    // browser_resume's approved pending action is consumed when it starts, even if the call then
+    // yields at its deadline, so a later resume cannot run it twice. Other actions leave it alone.
+    if (this.dispatchingPending) {
+      this.dispatchingPending = false;
+      delete this.pendingGatedAction;
+    }
     // An action-triggered navigation may wait on a slow server, so allow more than the observe path.
-    this.staleRecoveryDeadline = started + Math.min(this.navigationTimeoutMs, 10_000);
+    this.staleRecoveryDeadline =
+      started + this.cappedTimeout(Math.min(this.navigationTimeoutMs, 10_000));
     let result: ActionResult;
     try {
       this.checkCancellation();
       result = await this.deps.executeAction(this.page, observation, action, values, {
-        navigationTimeoutMs: this.navigationTimeoutMs,
-        waitTimeoutMs: Math.max(
-          0,
-          Math.min(3000, this.budget.seconds * 1000 - (this.deps.now() - this.invocationStarted)),
-        ),
+        navigationTimeoutMs: this.cappedTimeout(this.navigationTimeoutMs),
+        waitTimeoutMs: Math.max(0, Math.min(3000, this.remainingInvocationMs())),
         actionabilityTimeoutMs: Math.max(
           1,
-          Math.min(
-            this.actionabilityTimeoutMs,
-            this.budget.seconds * 1000 - (this.deps.now() - this.invocationStarted),
-          ),
+          Math.min(this.actionabilityTimeoutMs, this.remainingInvocationMs()),
         ),
         strictIdentity: approved || Boolean(matched) || Boolean(this.pendingGatedAction),
       });
@@ -1711,6 +1886,7 @@ export class OrchestratorSession {
     // cancellation is checked only before the next step begins.
     const ms = Math.max(0, this.deps.now() - started);
     this.lastExecutedActionAt = this.deps.now();
+    if (this.deadlineExceeded() && (result.timings.waitMs ?? 0) > 0) return this.deadlineResult();
     if (result.outcome === "not-focusable")
       return this.handoff("uncertain", { missing: "target cannot be focused" });
     if (
@@ -1897,6 +2073,8 @@ export class OrchestratorSession {
             approved,
             batchStep ?? this.steps,
             true,
+            false,
+            callApproval,
           );
       }
       if (this.lastCoveredTarget === element.fingerprint)
@@ -1911,7 +2089,16 @@ export class OrchestratorSession {
         await this.page.key("Escape");
         const refreshed = await this.fresh();
         const retry = this.retargetAction(action, element, refreshed.observation);
-        if (retry) return this.execute(retry, confidence, approved, batchStep ?? this.steps, true);
+        if (retry)
+          return this.execute(
+            retry,
+            confidence,
+            approved,
+            batchStep ?? this.steps,
+            true,
+            false,
+            callApproval,
+          );
       }
     } else delete this.lastCoveredTarget;
     const next = await this.fresh();
@@ -1922,18 +2109,25 @@ export class OrchestratorSession {
     if (result.outcome === "stale" && !retriedStale && element) {
       const refreshed = this.retargetAction(action, element, next.observation);
       if (refreshed)
-        return this.execute(refreshed, confidence, approved, batchStep ?? this.steps, true);
+        return this.execute(
+          refreshed,
+          confidence,
+          approved,
+          batchStep ?? this.steps,
+          true,
+          false,
+          callApproval,
+        );
     }
-    if (batchStep === undefined && this.exceeded())
-      return this.result("BUDGET_EXHAUSTED", "budget_exhausted");
+    if (batchStep === undefined && this.exceeded()) return this.budgetResult();
     this.queuedSample = next;
     return undefined;
   }
-  async run(options: { signal?: AbortSignal } = {}): Promise<SessionResult> {
-    return this.withInvocationSignal(options.signal, () => this.runInvocation());
+  async run(options: { signal?: AbortSignal; deadlineAt?: number } = {}): Promise<SessionResult> {
+    return this.withInvocationSignal(options.signal, () => this.runInvocation(options.deadlineAt));
   }
-  private async runInvocation(): Promise<SessionResult> {
-    this.beginInvocation();
+  private async runInvocation(deadlineAt?: number): Promise<SessionResult> {
+    this.beginInvocation(deadlineAt);
     if (this.blockedByPolicy) return this.result("BLOCKED_BY_POLICY", "blocked_address");
     const unresponsive = await this.checkPageLiveness();
     if (unresponsive && unresponsive.reason !== "isolated_reopen") return unresponsive;
@@ -1946,12 +2140,16 @@ export class OrchestratorSession {
     try {
       if (this.initialNavigationFailure) {
         const failure = this.initialNavigationFailure.failure;
+        if (failure === "call_deadline_exceeded") {
+          delete this.initialNavigationFailure;
+          return this.deadlineResult();
+        }
         const handoff = await this.handoff("error_page", { failure });
         delete this.initialNavigationFailure;
         return handoff;
       }
       this.checkCancellation();
-      if (this.exceeded()) return this.result("BUDGET_EXHAUSTED", "budget_exhausted");
+      if (this.exceeded() && !this.deadlineExceeded()) return this.budgetResult();
       for (;;) {
         this.checkCancellation();
         let sampled = await this.fresh(this.queuedSample);
@@ -1978,7 +2176,7 @@ export class OrchestratorSession {
         if (await this.verified(sampled.observation))
           return this.result("DONE_VERIFIED", "success_assertions_met");
         sampled = await this.fresh(sampled);
-        if (this.exceeded()) return this.result("BUDGET_EXHAUSTED", "budget_exhausted");
+        if (this.exceeded()) return this.budgetResult();
         const observation = sampled.observation;
         const findings = sampled.findings.filter(
           (finding) => !(finding.kind === "login_wall" && this.hasOriginSecret(observation.url)),
@@ -2023,12 +2221,14 @@ export class OrchestratorSession {
           decision = await this.decideWithinBudget(decisionRequest);
         } catch (error) {
           this.checkCancellation();
+          if (error instanceof DecisionAbortedError && error.message === "call deadline exceeded")
+            return this.deadlineResult();
           await this.logDecisionFailure(decisionRequest, error, decisionStarted);
           if (
             this.exceeded() ||
             (error instanceof DecisionAbortedError && error.message === "session budget exhausted")
           )
-            return this.result("BUDGET_EXHAUSTED", "budget_exhausted");
+            return this.budgetResult();
           return this.decisionFailure(error, reductions);
         }
         this.decideMs += Math.max(decision.latencyMs, this.deps.now() - decisionStarted);
@@ -2042,7 +2242,7 @@ export class OrchestratorSession {
             ? this.decisionFailure(error)
             : this.result("FAILED", "decision_invalid_answer", { failure: failureDetails(error) });
         }
-        if (this.exceeded()) return this.result("BUDGET_EXHAUSTED", "budget_exhausted");
+        if (this.exceeded()) return this.budgetResult();
         let outcome: PolicyOutcome = this.deps.interpret(questions, decision.answers, context);
         let checkRequest: DecisionRequest | undefined;
         let checkedDecision: DecisionResult | undefined;
@@ -2057,13 +2257,15 @@ export class OrchestratorSession {
             checked = await this.decideWithinBudget(checkRequest);
           } catch (error) {
             this.checkCancellation();
+            if (error instanceof DecisionAbortedError && error.message === "call deadline exceeded")
+              return this.deadlineResult();
             await this.logDecisionFailure(checkRequest, error, checkStarted);
             if (
               this.exceeded() ||
               (error instanceof DecisionAbortedError &&
                 error.message === "session budget exhausted")
             )
-              return this.result("BUDGET_EXHAUSTED", "budget_exhausted");
+              return this.budgetResult();
             return this.decisionFailure(error, [], true);
           }
           checkedDecision = checked;
@@ -2080,7 +2282,7 @@ export class OrchestratorSession {
                 });
           }
           if (this.sampleVersion !== this.navigationVersion) continue;
-          if (this.exceeded()) return this.result("BUDGET_EXHAUSTED", "budget_exhausted");
+          if (this.exceeded()) return this.budgetResult();
           outcome = this.deps.resolveCheck(
             outcome,
             checked.answers,
@@ -2226,10 +2428,10 @@ export class OrchestratorSession {
       allowed_domains?: string[];
       dialog?: { accept: boolean; value_key?: string };
     } = {},
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; deadlineAt?: number } = {},
   ): Promise<SessionResult> {
     return this.withInvocationSignal(options.signal, async () => {
-      this.beginInvocation();
+      this.beginInvocation(options.deadlineAt);
       if (this.blockedByPolicy) return this.result("BLOCKED_BY_POLICY", "blocked_address");
       const unresponsive = await this.checkPageLiveness();
       if (unresponsive && unresponsive.reason !== "isolated_reopen") return unresponsive;
@@ -2247,7 +2449,7 @@ export class OrchestratorSession {
         this.constraints.allowed_domains = [
           ...new Set([...(this.constraints.allowed_domains ?? []), ...update.allowed_domains]),
         ];
-      if (this.exceeded()) return this.result("BUDGET_EXHAUSTED", "budget_exhausted");
+      if (this.exceeded()) return this.budgetResult();
       if (update.dialog) {
         try {
           const answered = await this.answerDialog(update.dialog.accept, update.dialog.value_key);
@@ -2269,18 +2471,30 @@ export class OrchestratorSession {
           : update.allow_irreversible === true);
       if (pendingAction && pendingAllowed) {
         const pending = pendingAction;
-        delete this.pendingGatedAction;
         try {
           const current = await this.sample();
+          if (this.exceeded()) return this.budgetResult();
           const refreshed = samePage(pending.url, current.observation.url)
             ? this.retargetAction(pending.action, pending, current.observation)
             : undefined;
-          if (!refreshed) return this.handoff("uncertain", { missing: "stored target changed" });
-          const result = await this.execute(
-            refreshed,
-            undefined,
-            pending.reason.startsWith("domain:") ? false : true,
-          );
+          if (!refreshed) {
+            delete this.pendingGatedAction;
+            return this.handoff("uncertain", { missing: "stored target changed" });
+          }
+          if (this.exceeded()) return this.budgetResult();
+          this.dispatchingPending = true;
+          let result: SessionResult | undefined;
+          try {
+            result = await this.execute(
+              refreshed,
+              undefined,
+              pending.reason.startsWith("domain:") ? false : true,
+            );
+          } finally {
+            this.dispatchingPending = false;
+          }
+          if (result === undefined || result.reason !== "call_deadline_exceeded")
+            delete this.pendingGatedAction;
           if (result) return result;
         } catch (error) {
           if (error instanceof PageUnresponsiveError) {
@@ -2298,6 +2512,7 @@ export class OrchestratorSession {
     ops: ManualOp[],
     options: { allow_irreversible?: boolean } = {},
   ): Promise<SessionResult> {
+    const callApproval: CallApproval = { available: options.allow_irreversible === true };
     this.beginInvocation();
     if (this.blockedByPolicy) return this.result("BLOCKED_BY_POLICY", "blocked_address");
     this.manualOpsInProgress = true;
@@ -2309,7 +2524,7 @@ export class OrchestratorSession {
     const version = this.navigationVersion;
     try {
       for (const op of ops) {
-        if (this.exceeded()) return this.result("BUDGET_EXHAUSTED", "budget_exhausted");
+        if (this.exceeded()) return this.budgetResult();
         if (op.action === "dialog") {
           if (op.accept === undefined)
             return this.handoff("uncertain", { missing: "dialog choice" });
@@ -2490,10 +2705,11 @@ export class OrchestratorSession {
         const outcome = await this.execute(
           action,
           undefined,
-          options.allow_irreversible === true,
+          false,
           undefined,
           false,
           true,
+          callApproval,
         );
         if (
           this.steps > beforeStep &&

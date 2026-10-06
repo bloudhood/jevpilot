@@ -2,6 +2,29 @@
 
 This project follows Keep a Changelog. Versions use Semantic Versioning.
 
+## [0.4.0] - 2026-10-06
+
+Downloads reach the agent, a call stops before the client's own timeout and keeps its session, and the package installs from npm. Two behavior changes: `browser_run` and `browser_resume` stop after 45 seconds by default (`JEVPILOT_CALL_DEADLINE_MS=0` restores the old behavior), and `browser_act`'s `allow_irreversible` approves only the first irreversible operation of the call.
+
+### Added
+
+- Every tool declares the four MCP annotation hints (read-only, destructive, idempotent, open-world); see docs/tools.md.
+- Session results list the session's downloads (`downloads`: name, state, and for a verified complete file its server-local path and size), and `browser_run` accepts `success.download_completed`.
+- `JEVPILOT_DOWNLOAD_DIR` sets a persistent download directory for the managed browser profiles.
+- A per-call deadline, 45 seconds by default (`JEVPILOT_CALL_DEADLINE_MS`; `0` turns it off): `browser_run` and `browser_resume` stop at the next safe point before the client's own timeout, return `BUDGET_EXHAUSTED` with reason `call_deadline_exceeded` and keep the session for `browser_resume`. It bounds initial navigation, waits after actions, and observation waits; a call during a cold browser start may return `The browser is still starting; call browser_run again.` `jevpilot-mcp doctor` shows the effective value.
+
+### Changed
+
+- README installs from npm (jevpilot); the GitHub release package remains available.
+- browser_act's allow_irreversible approves only the first irreversible operation of the call, as documented. It used to approve every irreversible operation in the batch; a later one now stops with CONFIRM_REQUIRED.
+- `browser_observe`'s description says that `screenshot=true` saves a temporary JPEG of the viewport, that screenshot files are deleted when the session closes, and that `browser_screenshot` is the tool for looking at the page.
+- `browser_observe`'s description says that it may reopen an unresponsive page in a new tab.
+
+### Fixed
+
+- A click that starts a download no longer waits for a navigation that never comes; it used to take the whole navigation timeout (30 s by default).
+- A server that refuses to start because of an invalid setting no longer leaves an empty temp directory behind.
+
 ## [0.3.1] - 2026-10-04
 
 Fixes for element screenshots found in a review of 0.3.0. No configuration changes.

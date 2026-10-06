@@ -219,6 +219,28 @@ test("O8: an invalid environment setting fails the config check instead of crash
   assert.equal(result.ok, false);
 });
 
+test("doctor reports the call deadline", async () => {
+  const run = (deadline?: string) =>
+    runDoctor({
+      env: deadline === undefined ? {} : { JEVPILOT_CALL_DEADLINE_MS: deadline },
+      noBrowser: true,
+      out: () => {},
+      ...temp,
+    });
+  const defaultResult = await run();
+  assert.equal(defaultResult.checks[1]?.status, "ok");
+  assert.match(defaultResult.checks[1]?.detail ?? "", /call-deadline=45000ms/u);
+  const offResult = await run("0");
+  assert.equal(offResult.checks[1]?.status, "ok");
+  assert.match(offResult.checks[1]?.detail ?? "", /call-deadline=off/u);
+  const invalidResult = await run("abc");
+  assert.equal(invalidResult.checks[1]?.status, "fail");
+  assert.equal(
+    invalidResult.checks[1]?.detail,
+    "JEVPILOT_CALL_DEADLINE_MS must be between 0 and 2147483647.",
+  );
+});
+
 test("R2: doctor fails the configuration check for an unsupported engine", async () => {
   const result = await runDoctor({
     env: { JEVPILOT_ENGINE: "unsupported" },

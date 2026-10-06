@@ -57,9 +57,10 @@ Flags containing spaces, such as `--host-resolver-rules=MAP *.internal.test 169.
 | `JEVPILOT_ISOLATED_SESSIONS`        | `1` opens each run in a fresh browser context without shared cookies.                                                                                                                                                                                       |
 | `JEVPILOT_NAVIGATION_TIMEOUT_MS`    | Navigation timeout. Default 30000.                                                                                                                                                                                                                          |
 | `JEVPILOT_ACTIONABILITY_TIMEOUT_MS` | How long an action waits for its target to become visible, stable and enabled. Default 2000.                                                                                                                                                                |
+| `JEVPILOT_CALL_DEADLINE_MS`         | Time limit in milliseconds for one `browser_run` or `browser_resume` call, counted from when the call arrives; when it runs out first, the call stops at the next safe point and keeps the session. Default 45000; `0` turns it off.                        |
 | `JEVPILOT_THRESHOLDS`               | Optional JSON object of confidence thresholds between 0 and 1 (see [docs/tools.md](tools.md)).                                                                                                                                                              |
 
-MCP clients cancel a tool call after their own request timeout (the TypeScript SDK defaults to 60 seconds), which is shorter than the default 180-second budget. Set the client timeout above `budget.seconds`, or lower `budget.seconds`; a cancelled `browser_run` stops and closes its session, while a cancelled `browser_resume` stops and keeps it.
+MCP clients cancel a tool call after their own request timeout (the TypeScript SDK defaults to 60 seconds), which is shorter than the default 180-second budget. A cancelled `browser_run` stops and closes its session, while a cancelled `browser_resume` stops and keeps it. The default 45-second deadline sits below the common 60-second client timeout; set it a little below the client's timeout if that timeout is shorter. `browser_run` and `browser_resume` then return `BUDGET_EXHAUSTED` with reason `call_deadline_exceeded` and keep the session, and `browser_resume` continues it. Initial navigation, waits after actions, and observation waits are bounded by this deadline; a call arriving during a cold browser start may instead return `The browser is still starting; call browser_run again.` Set it to `0` only when the client waits longer than `budget.seconds`.
 
 Page loads (top-level documents, iframes, redirects, popups and downloads) are checked against the addresses their host resolves to before the request is sent, and again against the address the browser actually connected to. A blocked main-frame load ends the session with `BLOCKED_BY_POLICY`; nothing from that page is observed or returned. Subresource requests (scripts, images, `fetch`) are not checked, and behind a browser proxy only the pre-request check applies.
 
@@ -71,7 +72,10 @@ If a host remains unverified because the lookup times out or returns a resolver 
 | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `JEVPILOT_IMAGE_RESPONSES` | `allow` (default) or `omit`. `omit` makes `browser_screenshot` behave like `output: "file"`: it saves the image and returns only the path, and its text says images are disabled by the server. Any other value is refused at startup.                                                                                                 |
 | `JEVPILOT_SCREENSHOT_DIR`  | Absolute path of an existing directory for `browser_screenshot` files. Files written there are named `jevpilot-<yyyyMMdd-HHmmss>-<id>.jpg` and jevpilot never deletes them; without it, screenshots go to the session's temporary directory and are removed when the session closes. A relative or missing path is refused at startup. |
+| `JEVPILOT_DOWNLOAD_DIR`    | Absolute path of an existing directory for downloads of the managed browser profiles. jevpilot never deletes files there; a verified download is renamed to `<id prefix>-<name>`. A relative or missing path, a profile file that also sets `downloadPath`, and an `attach` profile are refused at startup.                            |
 | `JEVPILOT_DISABLED_TOOLS`  | Comma-separated tool names to leave unregistered; whitespace and empty items are ignored. `browser_run` and `browser_close` cannot be disabled, and an unknown name is refused at startup.                                                                                                                                             |
+
+Without `JEVPILOT_DOWNLOAD_DIR`, downloads go to a profile file's `downloadPath`, else to `downloads` under the user data directory when one is set, else to a temporary directory removed when the browser closes. Under the HTTP transport, download paths are on the server.
 
 ## HTTP transport
 
@@ -132,7 +136,7 @@ claude mcp add --transport http jevpilot http://127.0.0.1:8940/mcp --header "Aut
 `jevpilot-mcp doctor` checks, with the same environment as the server: the Node version, every setting and its effective value, one real browser launch with its self-check, one minimal Jev call (latency and model; errors only by category) and the temp directory. `--no-browser` skips the launch and `--json` prints one JSON object. It exits with 1 when a check fails and never prints keys, tokens or secret values.
 
 ```sh
-npx -y --package https://github.com/bloudhood/jevpilot/releases/download/v0.3.1/jevpilot-0.3.1.tgz jevpilot-mcp doctor
+npx -y --package jevpilot@0.4.0 jevpilot-mcp doctor
 ```
 
 ## Sessions

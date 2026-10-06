@@ -46,11 +46,56 @@ test("observe settles and applies budget, ranking and formatting", async () => {
   assert.ok(estimateTokens(formatObservation(state)) <= 3000);
 });
 
+test("slow observation cannot add a full timeout", async () => {
+  const snapshot = observation([]);
+  const { timings: _timings, ...scriptedSnapshot } = snapshot;
+  const page = new FakePageHandle(scriptedSnapshot);
+  await observe(page, { maxWaitMs: 17 });
+  assert.equal(page.timeouts[0], 17);
+  assert.ok(page.timeouts.every((timeout) => timeout <= 17));
+});
+
 test("observe requests a quiet wait for same-URL navigation events", async () => {
   const { timings: _timings, ...snapshot } = observation([]);
   const page = new FakePageHandle(snapshot);
   await observe(page, { settleNavigation: true });
   assert.deepEqual(page.calls[0]?.args, [true]);
+});
+
+test("probe reports distinct main-frame and child-frame phases", async (context) => {
+  let clock = 0;
+  context.mock.method(performance, "now", () => clock);
+  const { timings: _mainTimings, ...main } = observation([]);
+  const { timings: _childTimings, ...child } = observation([]);
+  const page = new FakePageHandle();
+  page.callIsolated = async (fn) => {
+    if (fn.name === "installObserverLibrary") clock += 7;
+    if (fn.name === "pageSnapshot") {
+      clock += 60;
+      return main as Awaited<ReturnType<typeof fn>>;
+    }
+    return 0 as Awaited<ReturnType<typeof fn>>;
+  };
+  page.frameHandles = [
+    {
+      id: "child",
+      offset: { x: 0, y: 0 },
+      async callIsolated(fn) {
+        if (fn.name === "pageSnapshot") {
+          clock += 80;
+          return child as Awaited<ReturnType<typeof fn>>;
+        }
+        return undefined as Awaited<ReturnType<typeof fn>>;
+      },
+    },
+  ];
+  const { timings } = await observe(page);
+  assert.equal(timings.mainFrameMs, 67);
+  assert.equal(timings.childFramesMs, 80);
+  assert.ok(timings.mainFrameMs < 75);
+  assert.ok(timings.mainFrameMs + timings.childFramesMs <= timings.snapshotMs + 5);
+  assert.ok(timings.mainFrameMs <= timings.snapshotMs);
+  assert.ok(timings.childFramesMs <= timings.snapshotMs);
 });
 
 test("resolveRef uses the page isolated call", async () => {

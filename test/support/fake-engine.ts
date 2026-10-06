@@ -24,6 +24,7 @@ export class FakePageHandle implements PageHandle {
   readonly id = "fake-page";
   readonly capabilities = capabilities;
   readonly calls: { name: string; args: unknown[] }[] = [];
+  readonly timeouts: number[] = [];
   readonly results: unknown[];
   private readonly handlers = new Map<keyof PageEvents, Set<(value: never) => void>>();
   frameHandles: FrameHandle[] = [];
@@ -46,6 +47,7 @@ export class FakePageHandle implements PageHandle {
     args: A,
     _options: { timeoutMs?: number } = {},
   ): Promise<R> {
+    if (_options.timeoutMs !== undefined) this.timeouts.push(_options.timeoutMs);
     if (fn.name === "installObserverLibrary") return undefined as R;
     this.calls.push({ name: fn.name, args });
     if (fn.name === "waitForNavigationQuiet") return 0 as R;
@@ -116,6 +118,7 @@ export class FakePageHandle implements PageHandle {
     return { ...result, mimeType: "image/jpeg" as const };
   }
   async frames(_options?: { timeoutMs?: number }): Promise<FrameHandle[]> {
+    if (_options?.timeoutMs !== undefined) this.timeouts.push(_options.timeoutMs);
     return this.frameHandles;
   }
   async handleDialog(_accept: boolean, _promptText?: string): Promise<void> {}

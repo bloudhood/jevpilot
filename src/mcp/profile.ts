@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
+import { isAbsolute } from "node:path";
 import { createOwnedTempDir, removeTempDir } from "../util/owned-temp.ts";
 import {
   BrowserConfigError,
@@ -7,6 +8,15 @@ import {
   type BrowserProfile,
 } from "../engine/default.ts";
 import { McpUserError } from "./errors.ts";
+
+export const DEFAULT_CALL_DEADLINE_MS = 45_000;
+
+export function parseCallDeadline(value: string | undefined): number {
+  if (value === undefined) return DEFAULT_CALL_DEADLINE_MS;
+  if (!/^\d+$/u.test(value) || Number(value) > 2_147_483_647)
+    throw new McpUserError("JEVPILOT_CALL_DEADLINE_MS must be between 0 and 2147483647.");
+  return Number(value);
+}
 
 export function parseNavigationTimeout(value: string | undefined): number | undefined {
   if (value === undefined) return undefined;
@@ -39,6 +49,16 @@ export async function loadMcpProfile(
   profile: BrowserProfile;
   cleanup: () => Promise<void>;
 }> {
+  const configuredDownloadDir = env.JEVPILOT_DOWNLOAD_DIR;
+  if (configuredDownloadDir !== undefined) {
+    if (!isAbsolute(configuredDownloadDir))
+      throw new McpUserError("JEVPILOT_DOWNLOAD_DIR must be an absolute path.");
+    try {
+      if (!(await stat(configuredDownloadDir)).isDirectory()) throw new Error();
+    } catch {
+      throw new McpUserError("JEVPILOT_DOWNLOAD_DIR must be an existing directory.");
+    }
+  }
   if (env.JEVPILOT_PROFILE_FILE) {
     let contents: string;
     try {
@@ -61,8 +81,20 @@ export async function loadMcpProfile(
     )
       input = { ...input, executable: env.JEVPILOT_BROWSER_PATH };
     try {
-      return { profile: parseCdpProfile(input), cleanup: async () => {} };
+      const parsed = parseCdpProfile(input);
+      if (configuredDownloadDir) {
+        if (parsed.kind === "attach")
+          throw new McpUserError("JEVPILOT_DOWNLOAD_DIR cannot be used with an attach profile.");
+        if (parsed.downloadPath)
+          throw new McpUserError("JEVPILOT_DOWNLOAD_DIR conflicts with profile downloadPath.");
+        return {
+          profile: { ...parsed, downloadPath: configuredDownloadDir },
+          cleanup: async () => {},
+        };
+      }
+      return { profile: parsed, cleanup: async () => {} };
     } catch (error) {
+      if (error instanceof McpUserError) throw error;
       if (error instanceof BrowserConfigError) {
         const fields = [...new Set(error.problems.map((problem) => problem.split(":", 1)[0]))];
         throw new McpUserError(`JEVPILOT_PROFILE_FILE has invalid fields: ${fields.join(", ")}.`);
@@ -88,6 +120,7 @@ export async function loadMcpProfile(
       : { display: env.JEVPILOT_DISPLAY === "headed" ? "headed" : "headless" }),
     ...(extraArgs ? { extraArgs } : {}),
     ...(env.JEVPILOT_BROWSER_PATH ? { executable: env.JEVPILOT_BROWSER_PATH } : {}),
+    ...(configuredDownloadDir ? { downloadPath: configuredDownloadDir } : {}),
   };
   if (extraArgs) {
     // Fail at startup, not on the first browser_run.

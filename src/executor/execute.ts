@@ -421,34 +421,39 @@ export async function executeAction(
   }
   let navigationBegun = false;
   let navigationRequested = false;
+  let actionDispatched = false;
   let completeNavigation: (() => void) | undefined;
   const navigation = new Promise<void>((resolve) => {
     completeNavigation = resolve;
   });
   let navigationTimer: ReturnType<typeof setTimeout> | undefined;
+  const finishNavigation = (): void => {
+    if (navigationTimer) {
+      clearTimeout(navigationTimer);
+      navigationTimer = undefined;
+    }
+    completeNavigation?.();
+  };
   const onLoaded = (): void => {
-    if (navigationBegun) completeNavigation?.();
+    if (navigationBegun) finishNavigation();
   };
   const onRequested = (): void => {
     navigationRequested = true;
     navigationBegun = true;
-    navigationTimer ??= setTimeout(
-      () => completeNavigation?.(),
-      options.navigationTimeoutMs ?? 10000,
-    );
+    navigationTimer ??= setTimeout(finishNavigation, options.navigationTimeoutMs ?? 10000);
   };
   const onNavigated = (event: PageEvents["navigated"]): void => {
     navigationBegun = true;
-    if (event.sameDocument) completeNavigation?.();
-    else
-      navigationTimer ??= setTimeout(
-        () => completeNavigation?.(),
-        options.navigationTimeoutMs ?? 10000,
-      );
+    if (event.sameDocument) finishNavigation();
+    else navigationTimer ??= setTimeout(finishNavigation, options.navigationTimeoutMs ?? 10000);
+  };
+  const onDownload = (event: PageEvents["download"]): void => {
+    if (actionDispatched && navigationBegun && event.state === "started") finishNavigation();
   };
   page.on("navigationRequested", onRequested);
   page.on("navigated", onNavigated);
   page.on("domContentLoaded", onLoaded);
+  page.on("download", onDownload);
   let dialog: PageEvents["dialog"] | undefined;
   const onDialog = (opened: PageEvents["dialog"]): void => {
     dialog = opened;
@@ -480,6 +485,7 @@ export async function executeAction(
       previous?.clickPoint?.x ?? (rect ? rect.x + rect.width / 2 : before.viewport.width / 2);
     const y =
       previous?.clickPoint?.y ?? (rect ? rect.y + rect.height / 2 : before.viewport.height / 2);
+    actionDispatched = true;
     switch (action.kind) {
       case "click":
       case "toggle":
@@ -687,6 +693,7 @@ export async function executeAction(
     page.off("navigationRequested", onRequested);
     page.off("navigated", onNavigated);
     page.off("domContentLoaded", onLoaded);
+    page.off("download", onDownload);
     page.off("dialog", onDialog);
     page.off("popupOpening", onPopupOpening);
     page.off("popup", onPopup);

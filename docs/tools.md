@@ -6,17 +6,17 @@ Tool names and schemas below come from src/mcp/server.ts. Browser session result
 
 Starts a browser session and asks Jev to work toward a goal. If no decision port is configured, returns FAILED with reason decision_port_not_configured before launching the browser.
 
-| Input                 | Type                             | Required | Meaning                                                                                                                                                        |
-| --------------------- | -------------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| goal                  | non-empty string                 | Yes      | Task goal.                                                                                                                                                     |
-| url                   | URL string                       | No       | Initial URL; only http and https are accepted. Omit for a blank tab.                                                                                           |
-| navigation_timeout_ms | integer, 1 to 2147483647         | No       | Initial navigation timeout; default 30000 ms.                                                                                                                  |
-| values                | record of strings or secret refs | No       | Values keyed by short field descriptions. A secret ref has secret_ref and origins, where origins is a non-empty array of URL strings.                          |
-| success               | object                           | No       | Optional url_matches, text_present, or element_present checks. element_present has required non-empty role and name. Checks already true at start are ignored. |
-| constraints           | object                           | No       | Optional allowed_domains array of non-empty strings and allow_irreversible boolean.                                                                            |
-| budget                | object                           | No       | Optional steps (non-negative integer), seconds (non-negative number), and decision_tokens (non-negative integer).                                              |
-| thresholds            | object                           | No       | Optional per-session thresholds from 0 to 1: op, target, value_for, option_for, situation, goal_met, goal_met_unchanged, check and check_margin.               |
-| profile               | non-empty string                 | No       | Configured engine profile name; defaults to the server engine.                                                                                                 |
+| Input                 | Type                             | Required | Meaning                                                                                                                                                                                                    |
+| --------------------- | -------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| goal                  | non-empty string                 | Yes      | Task goal.                                                                                                                                                                                                 |
+| url                   | URL string                       | No       | Initial URL; only http and https are accepted. Omit for a blank tab.                                                                                                                                       |
+| navigation_timeout_ms | integer, 1 to 2147483647         | No       | Initial navigation timeout; default 30000 ms.                                                                                                                                                              |
+| values                | record of strings or secret refs | No       | Values keyed by short field descriptions. A secret ref has secret_ref and origins, where origins is a non-empty array of URL strings.                                                                      |
+| success               | object                           | No       | Optional url_matches, text_present, element_present, or download_completed checks. download_completed: true holds after a session download is verified complete; checks already true at start are ignored. |
+| constraints           | object                           | No       | Optional allowed_domains array of non-empty strings and allow_irreversible boolean. allow_irreversible pre-approves every irreversible action in the session.                                              |
+| budget                | object                           | No       | Optional steps (non-negative integer), seconds (non-negative number), and decision_tokens (non-negative integer).                                                                                          |
+| thresholds            | object                           | No       | Optional per-session thresholds from 0 to 1: op, target, value_for, option_for, situation, goal_met, goal_met_unchanged, check and check_margin.                                                           |
+| profile               | non-empty string                 | No       | Configured engine profile name; defaults to the server engine.                                                                                                                                             |
 
 Returns a session result.
 
@@ -37,15 +37,16 @@ Returns a session result.
 
 ## browser_observe
 
-Reads the current page without taking an action.
+Reads the current page without acting on it. To look at the page, use browser_screenshot.
+If the page has stopped responding, it may reopen the same URL once in a new isolated tab, which discards unsaved page state.
 
-| Input      | Type             | Required | Meaning                                            |
-| ---------- | ---------------- | -------- | -------------------------------------------------- |
-| session    | non-empty string | Yes      | Session ID.                                        |
-| detail     | compact or full  | No       | Observation detail level; compact is the default.  |
-| screenshot | boolean          | No       | Request a screenshot file when supported and safe. |
+| Input      | Type             | Required | Meaning                                                       |
+| ---------- | ---------------- | -------- | ------------------------------------------------------------- |
+| session    | non-empty string | Yes      | Session ID.                                                   |
+| detail     | compact or full  | No       | Observation detail level; compact is the default.             |
+| screenshot | boolean          | No       | Also save a JPEG of the visible viewport and return its path. |
 
-Returns a session result. screenshot_path is optional and points to a local file, saved as a JPEG.
+Returns a session result. screenshot_path is optional: the viewport screenshot requested with screenshot, otherwise a handoff screenshot when the result is a handoff. Both are temporary JPEG files, deleted when the session closes, and never written in sessions that use secret values.
 
 ## browser_screenshot
 
@@ -66,11 +67,11 @@ Files: with `JEVPILOT_SCREENSHOT_DIR` set, the image is written there as `jevpil
 
 Performs one or more manual operations against current element references. Each operation must include action.
 
-| Input              | Type                                     | Required | Meaning                                       |
-| ------------------ | ---------------------------------------- | -------- | --------------------------------------------- |
-| session            | non-empty string                         | Yes      | Session ID.                                   |
-| ops                | array of operation objects, at least one | Yes      | Actions to perform in order.                  |
-| allow_irreversible | boolean                                  | No       | Approve an irreversible action for this call. |
+| Input              | Type                                     | Required | Meaning                                                                                                                                                                                                                                                                  |
+| ------------------ | ---------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| session            | non-empty string                         | Yes      | Session ID.                                                                                                                                                                                                                                                              |
+| ops                | array of operation objects, at least one | Yes      | Actions to perform in order.                                                                                                                                                                                                                                             |
+| allow_irreversible | boolean                                  | No       | Approve one irreversible action in this call: the first operation that reaches the irreversible-action gate. A later gated operation in the same call stops with CONFIRM_REQUIRED; approving it with browser_resume runs only that operation, not the rest of the batch. |
 
 Operation fields:
 
@@ -140,13 +141,33 @@ Sends caller-provided state and typed questions directly to the configured Jev d
 
 Returns answers, usage with inputTokens/outputTokens, model and latency_ms.
 
+## Tool annotations
+
+| Tool               | readOnlyHint | destructiveHint | idempotentHint | openWorldHint |
+| ------------------ | ------------ | --------------- | -------------- | ------------- |
+| browser_run        | false        | true            | false          | true          |
+| browser_resume     | false        | true            | false          | true          |
+| browser_act        | false        | true            | false          | true          |
+| browser_navigate   | false        | true            | false          | true          |
+| browser_tabs       | false        | true            | false          | true          |
+| browser_observe    | false        | true            | false          | true          |
+| browser_close      | false        | true            | true           | true          |
+| browser_screenshot | false        | false           | false          | true          |
+| jev_decide         | true         | false           | true           | true          |
+
+Every tool declares all four MCP hints. browser_observe is not read-only because of the recovery above; browser_screenshot is not read-only because a ref capture scrolls the element into view and file output keeps a file, but it only adds uniquely named files. browser_close is idempotent: closing again has no further effect (it reports an unknown session). Hints help hosts present tools; the server's own gates (domains, irreversible actions, secrets) apply regardless.
+
 ## Result shape
 
-Session results contain status, reason, question, session, url, title, snapshot, trace, timing and usage. Optional fields are details and screenshot_path. Status is one of:
+Session results contain status, reason, question, session, url, title, snapshot, trace, timing and usage. Optional fields are details, screenshot_path and downloads. Status is one of:
 
 RUNNING, DONE_VERIFIED, DONE_UNVERIFIED, NEEDS_VALUES, NEEDS_LOGIN, BLOCKED_BY_CHALLENGE, BLOCKED_BY_POLICY, CONFIRM_REQUIRED, INFO_NOT_ON_PAGE, UNCERTAIN, STUCK, ERROR_PAGE, BUDGET_EXHAUSTED or FAILED.
 
+BUDGET_EXHAUSTED with reason `call_deadline_exceeded` means the call reached `JEVPILOT_CALL_DEADLINE_MS` before the goal was done: the session is kept and `browser_resume` continues it.
+
 Trace entries describe step, operation, optional target/coveredBy, confidence, outcome, drift and timing. Outcome is an executor action outcome or accepted/dismissed. usage always has decision_tokens; usage.detail appears only when JEVPILOT_USAGE_DETAIL=1.
+
+downloads appears once the session has started a download and lists its 20 most recent downloads. Each entry has id, a sanitized name, and state: in_progress, completed, canceled, or unavailable (Chrome reported it finished but the file could not be verified inside the download directory). A completed entry also has path and size_bytes; the file has been renamed to `<id prefix>-<name>`. The path is on the server (also under the HTTP transport), and the download URL is never returned.
 
 An MCP tool failure can instead have isError and a text message. Errors do not include raw provider bodies or secret values.
 

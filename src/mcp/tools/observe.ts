@@ -13,8 +13,14 @@ const tool: ToolModule = {
     host.registerTool(
       "browser_observe",
       {
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: true,
+        },
         description:
-          "Read the current page in an existing session without taking action. Use full detail when the compact snapshot omits needed content. A screenshot path may be returned for handoffs when safe.",
+          "Read the current page in an existing session without acting on it. Use full detail when the compact snapshot omits needed content. screenshot=true also saves a JPEG of the visible viewport, when the engine supports it, and returns its path; a handoff result may carry a screenshot path as well. These files are temporary, deleted when the session closes, and never written in sessions that use secret values. To look at the page yourself, use browser_screenshot. If the page has stopped responding, it may reopen the same URL once in a new isolated tab, which discards unsaved page state.",
         inputSchema: {
           ...session,
           detail: z.enum(["compact", "full"]).optional(),

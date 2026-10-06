@@ -28,15 +28,21 @@ export const fakeObservation = (hash: string): Observation => ({
   timings: { snapshotMs: 0, totalMs: 0 },
 });
 
-export function fakeMcpDeps(): McpDeps & { pages: FakePageHandle[]; launches: () => number } {
+export function fakeMcpDeps(): McpDeps & {
+  pages: FakePageHandle[];
+  launches: () => number;
+  launchGate: Promise<void> | undefined;
+} {
   const pages: FakePageHandle[] = [];
   let launches = 0;
+  const control: { launchGate: Promise<void> | undefined } = { launchGate: undefined };
   let samples = 0;
   let decisions = 0;
   const driver: EngineDriver = {
     kind: "fake",
     async launch(): Promise<BrowserHandle> {
       launches++;
+      await control.launchGate;
       return {
         engine: { name: "fake", driver: "fake", stealthLevel: "high" },
         capabilities: new FakePageHandle().capabilities,
@@ -61,6 +67,12 @@ export function fakeMcpDeps(): McpDeps & { pages: FakePageHandle[]; launches: ()
   });
   return {
     engines,
+    get launchGate() {
+      return control.launchGate;
+    },
+    set launchGate(value: Promise<void> | undefined) {
+      control.launchGate = value;
+    },
     decisionPort,
     pages,
     launches: () => launches,

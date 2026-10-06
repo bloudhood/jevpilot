@@ -10,6 +10,12 @@ const tool: ToolModule = {
     host.registerTool(
       "jev_decide",
       {
+        annotations: {
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: true,
+        },
         description:
           "Pass a state and typed questions directly to the configured decision port. This does not create or change a browser session.",
         inputSchema: { state: requestSchema.shape.state, questions: requestSchema.shape.questions },

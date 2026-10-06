@@ -64,6 +64,9 @@ export class EngineRegistry {
           get connected() {
             return browser.connected;
           },
+          get downloadPath() {
+            return browser.downloadPath;
+          },
           onDisconnected: (listener) => browser.onDisconnected(listener),
           newPage: (pageOptions) => browser.newPage(pageOptions),
           pages: () => browser.pages(),

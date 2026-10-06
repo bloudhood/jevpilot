@@ -9,7 +9,12 @@ import type { DecisionPort } from "../decision/types.ts";
 import type { BrowserHandle } from "../engine/types.ts";
 import { createDefaultEngine, findChrome } from "../engine/default.ts";
 import { createOwnedTempDir, removeTempDir } from "../util/owned-temp.ts";
-import { loadMcpProfile, parseActionabilityTimeout, parseNavigationTimeout } from "./profile.ts";
+import {
+  loadMcpProfile,
+  parseActionabilityTimeout,
+  parseCallDeadline,
+  parseNavigationTimeout,
+} from "./profile.ts";
 import { parseHttpConfig } from "./http.ts";
 import { parseMaxSessions, parseNetworkGuard } from "./network-guard.ts";
 import { parseThresholds } from "./thresholds.ts";
@@ -105,6 +110,7 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorResu
     const transport = parseHttpConfig(env);
     const navigation = parseNavigationTimeout(env.JEVPILOT_NAVIGATION_TIMEOUT_MS);
     const actionability = parseActionabilityTimeout(env.JEVPILOT_ACTIONABILITY_TIMEOUT_MS);
+    const callDeadline = parseCallDeadline(env.JEVPILOT_CALL_DEADLINE_MS);
     const thresholds = parseThresholds(env.JEVPILOT_THRESHOLDS);
     const network = parseNetworkGuard(env.JEVPILOT_NETWORK_GUARD, env.JEVPILOT_BLOCKED_ADDRESSES);
     const maxSessions = parseMaxSessions(env.JEVPILOT_MAX_SESSIONS);
@@ -115,7 +121,7 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorResu
     add(
       "config",
       "ok",
-      `${await effectiveProfile(loaded.profile, env)}; timeouts=${navigation ?? "default"}/${actionability ?? "default"}; thresholds=${thresholds ? "set" : "default"}; network=${network.mode}${network.extraBlocked.length ? ` +${network.extraBlocked.length} ranges` : ""}; max-sessions=${maxSessions}; transport=${transport.transport}${http ? `, HTTP ${http.host}:${http.port}` : ""}`,
+      `${await effectiveProfile(loaded.profile, env)}; timeouts=${navigation ?? "default"}/${actionability ?? "default"}; thresholds=${thresholds ? "set" : "default"}; network=${network.mode}${network.extraBlocked.length ? ` +${network.extraBlocked.length} ranges` : ""}; max-sessions=${maxSessions}; call-deadline=${callDeadline || "off"}${callDeadline ? "ms" : ""}; transport=${transport.transport}${http ? `, HTTP ${http.host}:${http.port}` : ""}`,
     );
   } catch (error) {
     add("config", "fail", errorMessage(error));

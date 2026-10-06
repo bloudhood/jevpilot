@@ -8,6 +8,12 @@ const tool: ToolModule = {
     host.registerTool(
       "browser_close",
       {
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: true,
+          openWorldHint: true,
+        },
         description:
           "Close a browser session and its tab, and delete its temporary handoff files. The shared browser remains available for other sessions.",
         inputSchema: session,

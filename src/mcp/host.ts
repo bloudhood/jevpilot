@@ -49,6 +49,7 @@ export type McpDeps = {
   imageResponses?: "allow" | "omit";
   screenshotDir?: string;
   disabledTools?: string[];
+  callDeadlineMs?: number;
 };
 
 export class BrowserDisconnectedError extends Error {
@@ -63,8 +64,15 @@ export class BrowserDisconnectedError extends Error {
 export type ToolConfig<S extends z.ZodRawShape> = {
   description: string;
   inputSchema: S;
+  annotations: ToolAnnotations;
   /** When absent: dispatch does not validate results and results carry no structuredContent. */
   outputSchema?: z.ZodRawShape;
+};
+export type ToolAnnotations = {
+  readOnlyHint: boolean;
+  destructiveHint: boolean;
+  idempotentHint: boolean;
+  openWorldHint: boolean;
 };
 export type ToolHandler<S extends z.ZodRawShape> = (
   input: z.output<z.ZodObject<S>>,
@@ -104,7 +112,7 @@ export class ToolHost {
   private server: McpServer | undefined;
 
   constructor(deps: McpDeps) {
-    this.deps = deps;
+    this.deps = { ...deps, clock: deps.clock ?? deps.orchestrator?.now ?? Date.now };
     this.idleTimer = setInterval(() => {
       if (!this.closing) void this.sweepIdle();
     }, deps.idleReclaimIntervalMs ?? 60_000);
@@ -276,6 +284,7 @@ export class ToolHost {
   async runNewSession(options: {
     profile?: string;
     signal: AbortSignal;
+    deadlineAt?: number;
     build: (page: PageHandle, browser: BrowserHandle) => Promise<OrchestratorSession>;
   }): Promise<SessionResult | "full"> {
     const { signal } = options;
@@ -289,10 +298,36 @@ export class ToolHost {
       if (opening) this.openingSessions--;
       opening = false;
     };
-    const active = await this.getBrowser(options.profile).catch((error: unknown) => {
+    const launch = this.getBrowser(options.profile).catch((error: unknown) => {
       registered();
       throw error;
     });
+    let launchTimer: ReturnType<typeof setTimeout> | undefined;
+    const active = await (
+      options.deadlineAt === undefined
+        ? launch
+        : Promise.race([
+            launch,
+            new Promise<BrowserHandle>((_resolve, reject) => {
+              const remaining = Math.max(0, options.deadlineAt! - this.deps.clock!());
+              launchTimer = setTimeout(
+                () =>
+                  reject(
+                    new McpUserError("The browser is still starting; call browser_run again."),
+                  ),
+                remaining,
+              );
+              launchTimer.unref();
+            }),
+          ])
+    )
+      .finally(() => {
+        if (launchTimer) clearTimeout(launchTimer);
+      })
+      .catch((error: unknown) => {
+        registered();
+        throw error;
+      });
     if (this.deps.isolatedSessions && !active.capabilities.isolatedContexts) {
       registered();
       throw new McpUserError("Selected engine does not support isolated sessions.");
@@ -319,7 +354,12 @@ export class ToolHost {
       this.sessions.set(instance.id, instance);
       registered();
       try {
-        return await this.inSession(instance, () => instance.run({ signal }));
+        return await this.inSession(instance, () =>
+          instance.run({
+            signal,
+            ...(options.deadlineAt !== undefined ? { deadlineAt: options.deadlineAt } : {}),
+          }),
+        );
       } finally {
         if (unusable()) await discard();
       }

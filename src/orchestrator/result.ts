@@ -26,6 +26,18 @@ export const sessionResultSchema = z.object({
   title: z.string(),
   snapshot: z.string(),
   screenshot_path: z.string().optional(),
+  downloads: z
+    .array(
+      z.object({
+        id: z.string(),
+        name: z.string(),
+        state: z.enum(["in_progress", "completed", "canceled", "unavailable"]),
+        path: z.string().optional(),
+        size_bytes: z.number().optional(),
+      }),
+    )
+    .max(20)
+    .optional(),
   trace: z.array(
     z.object({
       step: z.number(),

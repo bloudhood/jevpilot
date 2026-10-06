@@ -9,6 +9,12 @@ const tool: ToolModule = {
     host.registerTool(
       "browser_navigate",
       {
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: true,
+        },
         description: "Navigate the selected session tab within its domain allowlist.",
         inputSchema: { ...session, url: httpUrl },
         outputSchema: sessionResultSchema.shape,

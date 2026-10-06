@@ -108,6 +108,178 @@ const decision: DecisionResult = {
   attempts: 1,
 };
 
+test("seconds reset but tokens remain cumulative", async () => {
+  const clock = { now: 0 };
+  const instance = fixture({
+    clock,
+    options: { budget: { seconds: 0.1, steps: 2 } },
+    decide: async () => {
+      clock.now += 20;
+      return decision;
+    },
+    outcomes: [{ type: "act", action: action() }],
+    executeAction: async () => {
+      clock.now += 20;
+      return changed();
+    },
+  });
+  try {
+    const first = await instance.session.run({ deadlineAt: 50 });
+    assert.equal(first.reason, "call_deadline_exceeded");
+    assert.equal(first.trace.length, 1);
+    assert.equal(first.usage.decision_tokens, 6);
+    clock.now += 1000;
+    const second = await instance.session.resume({}, { deadlineAt: clock.now + 50 });
+    assert.equal(second.reason, "call_deadline_exceeded");
+    assert.equal(second.trace.length, 2);
+    assert.equal(second.usage.decision_tokens, 12);
+    const third = await instance.session.resume({}, { deadlineAt: clock.now + 1000 });
+    assert.equal(third.reason, "budget_exhausted");
+    assert.equal(third.trace.length, 4);
+  } finally {
+    await instance.session.close();
+  }
+  const smaller = fixture({
+    clock: { now: 0 },
+    options: { budget: { seconds: 0.01 } },
+    decide: async () => {
+      smaller.clock.now = 20;
+      return decision;
+    },
+  });
+  try {
+    assert.equal((await smaller.session.run({ deadlineAt: 100 })).reason, "budget_exhausted");
+  } finally {
+    await smaller.session.close();
+  }
+});
+
+test("yield neither screenshots nor finalizes session logging", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "deadline-log-"));
+  const path = join(directory, "decisions.jsonl");
+  const clock = { now: 0 };
+  let directories = 0;
+  const instance = fixture({
+    clock,
+    options: { decisionLogPath: path },
+    tempDir: async () => {
+      directories++;
+      return directory;
+    },
+    decide: async () => {
+      clock.now += 10;
+      return decision;
+    },
+    outcomes: [{ type: "done_candidate", goalMet: 1 }],
+  });
+  try {
+    const result = await instance.session.run({ deadlineAt: 5 });
+    assert.equal(result.reason, "call_deadline_exceeded");
+    assert.equal(result.screenshot_path, undefined);
+    assert.equal(directories, 0);
+    assert.equal(
+      instance.page.calls.some((c) => c.name === "screenshot"),
+      false,
+    );
+    assert.equal(existsSync(path), false);
+    await instance.session.resume({}, { deadlineAt: 100 });
+    assert.match(await readFile(path, "utf8"), /session_end/u);
+  } finally {
+    await instance.session.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("deadline before approved action preserves pending approval", async () => {
+  const clock = { now: 0 };
+  let slow = false;
+  const target = element("Delete account");
+  const instance = fixture({
+    clock,
+    observe: async () => {
+      if (slow) clock.now += 10;
+      return observation([target]);
+    },
+    outcomes: [
+      { type: "act", action: action(target) },
+      { type: "handoff", reason: "needs_values", source: "code", details: {} },
+    ],
+  });
+  try {
+    assert.equal((await instance.session.run()).status, "CONFIRM_REQUIRED");
+    slow = true;
+    assert.equal(
+      (await instance.session.resume({ allow_irreversible: true }, { deadlineAt: clock.now + 5 }))
+        .reason,
+      "call_deadline_exceeded",
+    );
+    assert.ok(instance.session.pendingGatedAction);
+    assert.equal(instance.seen.actions.length, 0);
+    slow = false;
+    await instance.session.resume({ allow_irreversible: true }, { deadlineAt: clock.now + 100 });
+    assert.equal(instance.seen.actions.length, 1);
+    assert.equal(instance.session.pendingGatedAction, undefined);
+    await instance.session.resume();
+    assert.equal(instance.seen.actions.length, 1);
+  } finally {
+    await instance.session.close();
+  }
+});
+
+test("approved pending action that yields after dispatch is not run again", async () => {
+  const clock = { now: 0 };
+  const target = element("Delete account");
+  const instance = fixture({
+    clock,
+    observe: async () => observation([target]),
+    outcomes: [
+      { type: "act", action: action(target) },
+      { type: "handoff", reason: "needs_values", source: "code", details: {} },
+    ],
+    executeAction: async () => {
+      clock.now += 10;
+      return changed();
+    },
+  });
+  try {
+    assert.equal((await instance.session.run()).status, "CONFIRM_REQUIRED");
+    const resumed = await instance.session.resume(
+      { allow_irreversible: true },
+      { deadlineAt: clock.now + 5 },
+    );
+    assert.equal(resumed.reason, "call_deadline_exceeded");
+    assert.equal(instance.seen.actions.length, 1);
+    assert.equal(instance.session.pendingGatedAction, undefined);
+    await instance.session.resume({ allow_irreversible: true }, { deadlineAt: clock.now + 100 });
+    assert.equal(instance.seen.actions.length, 1);
+  } finally {
+    await instance.session.close();
+  }
+});
+
+test("completed success wins over an unnecessary yield", async () => {
+  const clock = { now: 0 };
+  let complete = false;
+  const instance = fixture({
+    clock,
+    options: { success: { text_present: "Finished" } },
+    pageMatches: async () => complete,
+    outcomes: [{ type: "act", action: action() }],
+    executeAction: async () => {
+      complete = true;
+      clock.now = 10;
+      return changed();
+    },
+    observe: async () => observation(undefined, complete ? "done" : "start"),
+  });
+  try {
+    assert.equal((await instance.session.run({ deadlineAt: 10 })).status, "DONE_VERIFIED");
+    assert.equal(instance.seen.actions.length, 1);
+  } finally {
+    await instance.session.close();
+  }
+});
+
 function r10Deferred() {
   let resolve!: () => void;
   const promise = new Promise<void>((done) => {
@@ -3764,6 +3936,226 @@ test("run gates a redirect that lands off-list during the challenge auto-pass wi
     );
   } finally {
     await fixtureCase.session.close();
+  }
+});
+
+test("benign ops preserve approval for the first gated op", async () => {
+  const field = element("Name", "textbox", {
+    ref: "field",
+    fingerprint: "field",
+    tag: "input",
+    inputType: "text",
+  });
+  const buy = element("Buy now", "button", { ref: "buy", fingerprint: "buy", inputType: "button" });
+  const instance = fixture({ observations: [observation([field, buy])] });
+  try {
+    const result = await instance.session.act(
+      [
+        { action: "type", ref: field.ref, text: "Ada" },
+        { action: "click", ref: buy.ref },
+      ],
+      { allow_irreversible: true },
+    );
+    assert.equal(result.status, "RUNNING");
+    assert.deepEqual(
+      instance.seen.actions.map((chosen) => chosen.kind),
+      ["type", "click"],
+    );
+    assert.deepEqual(instance.seen.actions[1], action(buy));
+  } finally {
+    await instance.session.close();
+  }
+});
+
+test("second gated op stops and becomes pending", async () => {
+  const buy = element("Buy now", "button", { ref: "buy", fingerprint: "buy" });
+  const remove = element("Delete account", "button", { ref: "delete", fingerprint: "delete" });
+  const tail = element("Next", "button", { ref: "tail", fingerprint: "tail" });
+  const instance = fixture({ observations: [observation([buy, remove, tail])] });
+  try {
+    const result = await instance.session.act(
+      [buy, remove, tail].map((item) => ({ action: "click" as const, ref: item.ref })),
+      { allow_irreversible: true },
+    );
+    assert.equal(result.status, "CONFIRM_REQUIRED");
+    assert.deepEqual(instance.seen.actions, [action(buy)]);
+    assert.deepEqual(instance.session.pendingGatedAction?.action, action(remove));
+    assert.equal(instance.session.pendingGatedAction?.ref, remove.ref);
+    assert.equal(instance.session.pendingGatedAction?.url, "http://example.test/start");
+  } finally {
+    await instance.session.close();
+  }
+});
+
+test("failed approved attempt cannot authorize another op", async () => {
+  const buy = element("Buy now", "button", { ref: "buy", fingerprint: "buy" });
+  const remove = element("Delete account", "button", { ref: "delete", fingerprint: "delete" });
+  const instance = fixture({
+    observations: [observation([buy, remove])],
+    execute: () => ({
+      ...changed(),
+      outcome: "disabled",
+      changes: { url: false, pageHash: false, value: false, checked: false },
+    }),
+  });
+  try {
+    const result = await instance.session.act(
+      [buy, remove].map((item) => ({ action: "click" as const, ref: item.ref })),
+      { allow_irreversible: true },
+    );
+    assert.equal(result.status, "CONFIRM_REQUIRED");
+    assert.deepEqual(instance.seen.actions, [action(buy)]);
+    assert.equal(result.trace[0]?.outcome, "disabled");
+    assert.deepEqual(instance.session.pendingGatedAction?.action, action(remove));
+  } finally {
+    await instance.session.close();
+  }
+});
+
+test("same-action retry preserves identity scope", async () => {
+  for (const outcome of ["stale", "covered"] as const) {
+    const buy = element("Buy now", "button", {
+      ref: "buy",
+      fingerprint: "buy",
+      inputType: "button",
+    });
+    const relocated = { ...buy, ref: "new-buy", fingerprint: "new-buy" };
+    const remove = element("Delete account", "button", { ref: "delete", fingerprint: "delete" });
+    const refreshed = { ...observation([relocated, remove]), epoch: 2 };
+    const strict: Array<boolean | undefined> = [];
+    const instance = fixture({
+      observations: [observation([buy, remove]), refreshed],
+      executeAction: async (_page, _before, _chosen, _values, options) => {
+        strict.push(options?.strictIdentity);
+        return strict.length === 1
+          ? {
+              ...changed(),
+              outcome,
+              ...(outcome === "covered" ? { coveredBy: { role: "menu", name: "Menu" } } : {}),
+            }
+          : changed();
+      },
+    });
+    try {
+      const result = await instance.session.act(
+        [
+          { action: "click", ref: buy.ref },
+          { action: "click", ref: remove.ref },
+        ],
+        { allow_irreversible: true },
+      );
+      assert.equal(result.status, "CONFIRM_REQUIRED", outcome);
+      assert.deepEqual(instance.seen.actions, [
+        action(buy),
+        {
+          kind: "click",
+          target: { epoch: 2, ref: relocated.ref, fingerprint: relocated.fingerprint },
+        },
+      ]);
+      assert.deepEqual(strict, [true, true]);
+      assert.equal(instance.session.pendingGatedAction?.ref, remove.ref);
+      assert.equal(instance.session.pendingGatedAction?.epoch, 2);
+      if (outcome === "covered")
+        assert.ok(
+          instance.page.calls.some((call) => call.name === "key" && call.args[0] === "Escape"),
+        );
+    } finally {
+      await instance.session.close();
+    }
+  }
+});
+
+test("resume approves pending op without replaying batch tail", async () => {
+  const buy = element("Buy now", "button", { ref: "buy", fingerprint: "buy" });
+  const tail = element("Next", "button", { ref: "tail", fingerprint: "tail" });
+  let decisions = 0;
+  const instance = fixture({
+    observations: [observation([buy, tail])],
+    decide: async () => {
+      decisions++;
+      return decision;
+    },
+    outcomes: [{ type: "done_candidate", goalMet: 0.9 }],
+  });
+  try {
+    assert.equal(
+      (
+        await instance.session.act([
+          { action: "click", ref: buy.ref },
+          { action: "click", ref: tail.ref },
+        ])
+      ).status,
+      "CONFIRM_REQUIRED",
+    );
+    assert.deepEqual(instance.seen.actions, []);
+    assert.deepEqual(instance.session.pendingGatedAction?.action, action(buy));
+    assert.equal(
+      (await instance.session.resume({ allow_irreversible: true })).status,
+      "DONE_UNVERIFIED",
+    );
+    assert.deepEqual(instance.seen.actions, [action(buy)]);
+    assert.equal(instance.session.pendingGatedAction, undefined);
+    assert.equal(decisions, 1, "resume continues with Jev's loop");
+  } finally {
+    await instance.session.close();
+  }
+});
+
+test("session preauthorization and Jev batches retain their semantics", async () => {
+  const buy = element("Buy now", "button", { ref: "buy", fingerprint: "buy" });
+  const remove = element("Delete account", "button", { ref: "delete", fingerprint: "delete" });
+  const field = element("Name", "textbox", {
+    ref: "field",
+    fingerprint: "field",
+    tag: "input",
+    inputType: "text",
+    formId: "purchase",
+  });
+  const submit = { ...buy, formId: "purchase", inputType: "submit" };
+  const manual = fixture({
+    observations: [observation([buy, remove])],
+    options: { constraints: { allow_irreversible: true } },
+  });
+  let decisions = 0;
+  const jev = fixture({
+    observations: [observation([field, submit])],
+    options: { values: { name: "Ada" } },
+    decide: async () => {
+      decisions++;
+      return decision;
+    },
+    outcomes: [
+      {
+        type: "batch",
+        actions: [
+          {
+            kind: "type",
+            target: { epoch: 1, ref: field.ref, fingerprint: field.fingerprint },
+            valueKey: "name",
+            submit: true,
+          },
+        ],
+      },
+    ],
+  });
+  try {
+    assert.equal(
+      (
+        await manual.session.act(
+          [buy, remove].map((item) => ({ action: "click" as const, ref: item.ref })),
+        )
+      ).status,
+      "RUNNING",
+    );
+    assert.deepEqual(manual.seen.actions, [action(buy), action(remove)]);
+    assert.equal((await jev.session.run()).status, "CONFIRM_REQUIRED");
+    assert.equal(decisions, 1);
+    assert.deepEqual(jev.seen.actions, []);
+    assert.equal(jev.session.pendingGatedAction?.action.kind, "type");
+    assert.equal(jev.session.pendingGatedAction?.ref, field.ref);
+  } finally {
+    await manual.session.close();
+    await jev.session.close();
   }
 });
 
